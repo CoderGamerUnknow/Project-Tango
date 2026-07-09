@@ -1,0 +1,40 @@
+{
+  "name": "project-tango",
+  "version": "1.0.0",
+  "description": "Local-first MCP server that lets LLM agents inspect, analyze, and manage e-commerce data (products, inventory, orders) over stdio. Zero-config mock data engine included, with a clean interface to swap in live Shopify/Stripe APIs.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "project-tango": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ecommerce",
+    "ai-tools",
+    "claude",
+    "cursor"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
+  }
+}

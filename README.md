@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/29839706/README.md)
 # Project Tango
 
 A **local-first** [Model Context Protocol](https://modelcontextprotocol.io) server that gives LLM agents — Claude Desktop, Cursor, VS Code, or any MCP-compatible client — instant, structured access to e-commerce data: products, inventory, orders, and sales analytics.

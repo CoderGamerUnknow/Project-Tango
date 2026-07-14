@@ -1,4 +1,23 @@
-import type { DataProvider, Order, Product } from "./types.js";
+import type { DataProvider, Order, OrderItem, Product } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Deep-clone helpers — every read method returns copies so that callers
+// cannot mutate the provider's internal state through live references.
+// ---------------------------------------------------------------------------
+
+function cloneProduct(p: Product): Product {
+  return {
+    ...p,
+    tags: [...p.tags],
+  };
+}
+
+function cloneOrder(o: Order): Order {
+  return {
+    ...o,
+    items: o.items.map((i): OrderItem => ({ ...i })),
+  };
+}
 
 /**
  * A rich, realistic starter catalog spanning tech, apparel, and home goods.
@@ -226,31 +245,34 @@ class MockDataProvider implements DataProvider {
   }
 
   async getProducts(): Promise<Product[]> {
-    return this.products;
+    return this.products.map(cloneProduct);
   }
 
   async getOrders(): Promise<Order[]> {
-    return this.orders;
+    return this.orders.map(cloneOrder);
   }
 
   async getProductById(id: string): Promise<Product | undefined> {
-    return this.products.find((p) => p.id === id);
+    const found = this.products.find((p) => p.id === id);
+    return found ? cloneProduct(found) : undefined;
   }
 
   async getProductBySku(sku: string): Promise<Product | undefined> {
-    return this.products.find((p) => p.sku.toLowerCase() === sku.toLowerCase());
+    const found = this.products.find((p) => p.sku.toLowerCase() === sku.toLowerCase());
+    return found ? cloneProduct(found) : undefined;
   }
 
   async updateProductInventory(id: string, newCount: number): Promise<Product | undefined> {
     const product = this.products.find((p) => p.id === id);
     if (!product) return undefined;
     product.inventoryCount = newCount;
-    return product;
+    return cloneProduct(product);
   }
 
   async addOrder(order: Order): Promise<Order> {
     this.orders.push(order);
-    return order;
+    // return a clone so the caller can't mutate the stored reference
+    return cloneOrder(order);
   }
 }
 

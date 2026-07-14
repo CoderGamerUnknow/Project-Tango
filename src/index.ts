@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { mockDataProvider } from "./mockData.js";
+import { withSanitizedErrors, formatZodIssues } from "./mcpHelpers.js";
 import type {
   AlertSeverity,
   DataProvider,
@@ -94,6 +95,7 @@ server.registerTool(
     inputSchema: {
       category: z
         .string()
+        .max(50)
         .optional()
         .describe(
           "Restrict results to a single category, e.g. 'tech', 'apparel', or 'home'. Case-insensitive. Omit to include all categories."
@@ -110,7 +112,7 @@ server.registerTool(
         .describe("Only include products priced at or below this amount, in USD."),
     },
   },
-  async ({ category, min_price, max_price }) => {
+  withSanitizedErrors(async ({ category, min_price, max_price }) => {
     const products = await dataProvider.getProducts();
 
     const filtered = products.filter((p) => {
@@ -125,7 +127,7 @@ server.registerTool(
       filters: { category: category ?? null, min_price: min_price ?? null, max_price: max_price ?? null },
       products: filtered,
     });
-  }
+  })
 );
 
 // -----------------------------------------------------------------------
@@ -150,7 +152,7 @@ server.registerTool(
         ),
     },
   },
-  async ({ threshold }) => {
+  withSanitizedErrors(async ({ threshold }) => {
     const effectiveThreshold = threshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
     const products = await dataProvider.getProducts();
 
@@ -165,7 +167,7 @@ server.registerTool(
       criticalCount: alerts.filter((a) => a.severity === "critical").length,
       alerts,
     });
-  }
+  })
 );
 
 // -----------------------------------------------------------------------
@@ -179,7 +181,7 @@ server.registerTool(
       "Calculates gross revenue, average order value (AOV), the top-selling products by units sold, and a breakdown " +
       "of orders by fulfillment status (pending / shipped / delivered), based on current order history.",
   },
-  async () => {
+  withSanitizedErrors(async () => {
     const [products, orders] = await Promise.all([dataProvider.getProducts(), dataProvider.getOrders()]);
 
     const grossRevenue = orders.reduce((sum, o) => sum + o.totalAmount, 0);
@@ -221,7 +223,7 @@ server.registerTool(
       topSellingProducts,
       orderFulfillmentBreakdown,
     });
-  }
+  })
 );
 
 // -----------------------------------------------------------------------
@@ -247,7 +249,7 @@ server.registerTool(
         ),
     },
   },
-  async ({ threshold }) => {
+  withSanitizedErrors(async ({ threshold }) => {
     const effectiveThreshold = threshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
     const [products, orders] = await Promise.all([dataProvider.getProducts(), dataProvider.getOrders()]);
 
@@ -289,7 +291,7 @@ server.registerTool(
       },
       recommendations,
     });
-  }
+  })
 );
 
 // -----------------------------------------------------------------------
@@ -303,10 +305,10 @@ server.registerTool(
       "Looks up a product by SKU and generates structured, high-conversion marketing copy (headline, short and long " +
       "description, key bullet points) plus SEO tags tailored to that product's category and tags.",
     inputSchema: {
-      sku: z.string().min(1).describe("The exact product SKU to generate marketing copy for, e.g. 'TCH-AB-001'."),
+      sku: z.string().min(1).max(30).describe("The exact product SKU to generate marketing copy for, e.g. 'TCH-AB-001'."),
     },
   },
-  async ({ sku }) => {
+  withSanitizedErrors(async ({ sku }) => {
     const product = await dataProvider.getProductBySku(sku);
     if (!product) {
       return errorResult(`No product found with SKU "${sku}". Use list_all_products to see valid SKUs.`);
@@ -348,7 +350,7 @@ server.registerTool(
       },
       seoTags,
     });
-  }
+  })
 );
 
 // -----------------------------------------------------------------------
@@ -364,11 +366,11 @@ server.registerTool(
       "success receipt with the updated stock levels. Rejects the entire order (no partial writes) if any item " +
       "is unavailable or under-stocked.",
     inputSchema: {
-      customer_name: z.string().min(1).describe("Full name of the customer placing the order."),
+      customer_name: z.string().min(1).max(100).describe("Full name of the customer placing the order."),
       items: z
         .array(
           z.object({
-            product_id: z.string().min(1).describe("The product's id, e.g. 'prod_004'."),
+            product_id: z.string().min(1).max(30).describe("The product's id, e.g. 'prod_004'."),
             quantity: z.number().int().positive().describe("Number of units of this product to order."),
           })
         )
@@ -376,7 +378,7 @@ server.registerTool(
         .describe("One or more line items for this order."),
     },
   },
-  async ({ customer_name, items }) => {
+  withSanitizedErrors(async ({ customer_name, items }) => {
     const products = await dataProvider.getProducts();
 
     // Validate every line item before mutating any state.
@@ -420,7 +422,7 @@ server.registerTool(
       receipt: newOrder,
       updatedStockLevels,
     });
-  }
+  })
 );
 
 // -----------------------------------------------------------------------
@@ -434,7 +436,12 @@ async function main() {
   console.error("Project Tango MCP server running on stdio.");
 }
 
-main().catch((error) => {
-  console.error("Fatal error starting Project Tango:", error);
+main().catch((error: unknown) => {
+  if (error instanceof z.ZodError) {
+    console.error(formatZodIssues(error));
+  } else {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Fatal error starting Project Tango:", message);
+  }
   process.exit(1);
 });

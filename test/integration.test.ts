@@ -15,7 +15,6 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { once } from "node:events";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -179,14 +178,14 @@ async function main() {
   assert(allData.count === 13, `Expected 13 products, got ${allData.count}`, allContent.slice(0, 100));
   assert(Array.isArray(allData.products), "products is an array");
   assert(allData.products.length === 13, "products length matches count");
-  // Verify deep-cloning: mutating a returned product should NOT affect the original
-  const mutatedProduct = { ...allData.products[0], name: "HACKED" };
+  // Verify deep-cloning: a second read should return the original data,
+  // not a previously returned reference that could have been mutated.
   const productsAgain = await mcp.send("tools/call", {
     name: "list_all_products",
     arguments: {},
   });
   const againData = safeJson(extractText(productsAgain));
-  assert(againData.products[0].name !== "HACKED", "Read isolation (clone)");
+  assert(againData.products[0].name === "AeroBuds Pro Wireless Earbuds", "Read isolation (clone)");
   console.log();
 
   // ── 3. list_all_products (with filters) ────────────────────────────

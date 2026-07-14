@@ -28,7 +28,10 @@ export function withSanitizedErrors<TArgs, TReturn extends { content: unknown[];
       return await handler(args);
     } catch (error) {
       const message = sanitizeError(error);
-      // Cast is safe — every tool handler returns this shape.
+      // Every tool handler in this codebase returns
+      // `{ content: [...], isError?: boolean }`, so the concrete shape
+      // below always satisfies TReturn. If a handler adds required fields
+      // beyond this base shape, this cast will need revisiting.
       return {
         isError: true,
         content: [{ type: "text" as const, text: message }],

@@ -408,7 +408,7 @@ server.registerTool(
     }
 
     const newOrder: Order = {
-      id: `ord_${Date.now()}`,
+      id: `ord_${crypto.randomUUID().slice(0, 8)}`,
       customerName: customer_name,
       items: resolvedItems.map(({ product, quantity }) => ({ productId: product.id, quantity })),
       totalAmount: Math.round(totalAmount * 100) / 100,

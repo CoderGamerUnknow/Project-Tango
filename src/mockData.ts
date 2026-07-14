@@ -231,7 +231,7 @@ const orders: Order[] = [
  * pipeline: every tool in src/index.ts is written against the `DataProvider`
  * interface, so replacing `mockDataProvider` with a `ShopifyDataProvider` /
  * `StripeDataProvider` that talks to real APIs requires no changes to tool
- * logic — only a new class implementing the same four methods.
+ * logic — only a new class implementing the same 6 methods.
  */
 class MockDataProvider implements DataProvider {
   private products: Product[];
@@ -270,9 +270,11 @@ class MockDataProvider implements DataProvider {
   }
 
   async addOrder(order: Order): Promise<Order> {
-    this.orders.push(order);
-    // return a clone so the caller can't mutate the stored reference
-    return cloneOrder(order);
+    // Clone before storing so the caller cannot mutate internal state
+    // through the original reference after the call returns.
+    const stored = cloneOrder(order);
+    this.orders.push(stored);
+    return stored;
   }
 }
 

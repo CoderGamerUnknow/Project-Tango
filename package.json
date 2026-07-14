@@ -1,7 +1,7 @@
 {
   "name": "project-tango",
-  "version": "1.0.0",
-  "description": "Local-first MCP server that lets LLM agents inspect, analyze, and manage e-commerce data (products, inventory, orders) over stdio. Zero-config mock data engine included, with a clean interface to swap in live Shopify/Stripe APIs.",
+  "version": "2.0.0",
+  "description": "Hybrid-engine MCP server: SQLite persistence + prefix-trie search + reactive event broker + saga rollback. Lets LLM agents inspect, analyze, and manage e-commerce data over stdio.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -31,9 +31,11 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.11.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.1.1",
     "tsx": "^4.23.0",
     "typescript": "^7.0.2"

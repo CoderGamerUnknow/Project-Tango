@@ -152,7 +152,7 @@ async function main() {
   console.log("── Tool Discovery ──────────────────────────────────────");
   const listResult = await mcp.send("tools/list");
   const tools = listResult.tools as Array<{ name: string; description?: string }>;
-  assert(tools.length === 6, `Expected 6 tools, got ${tools.length}`);
+  assert(tools.length === 7, `Expected 7 tools, got ${tools.length}`);
   const toolNames = tools.map((t) => t.name);
   assert(
     toolNames.includes("list_all_products") &&
@@ -160,8 +160,9 @@ async function main() {
       toolNames.includes("analyze_sales_metrics") &&
       toolNames.includes("smart_restock_predictor") &&
       toolNames.includes("draft_product_copy") &&
-      toolNames.includes("simulate_order_placement"),
-    "All 6 tool names present",
+      toolNames.includes("simulate_order_placement") &&
+      toolNames.includes("search_products"),
+    "All 7 tool names present",
     `Found: ${toolNames.join(", ")}`
   );
   console.log();
@@ -277,10 +278,30 @@ async function main() {
   const oData = safeJson(extractText(order));
   assert(oData.success === true, "Order succeeds", JSON.stringify(oData));
   assert(oData.receipt?.customerName === "Test User", "Receipt has customer name");
+  // prod_003 started at 15, we ordered 2, so stock should be 13
   assert(oData.updatedStockLevels?.[0]?.newStock === 13, "Stock decremented (15→13)");
   console.log();
 
-  // ── 9. Validation bounds ──────────────────────────────────────────
+  // ── 9. search_products (new v2.0.0 tool) ─────────────────────────
+  console.log("── Tool: search_products ────────────────────────────────");
+  const search = await mcp.send("tools/call", {
+    name: "search_products",
+    arguments: { query: "aero", max_results: 5 },
+  });
+  const sData = safeJson(extractText(search));
+  assert(sData.totalResults > 0, "Search returns results", `Query 'aero' returned ${sData.totalResults}`);
+  assert(sData.results.some((r: { productName: string }) => r.productName.includes("AeroBuds")), "AeroBuds in search results");
+  assert(typeof sData.results[0].score === "number", "Search results have scores");
+  // Edge case: empty results for nonsense query
+  const noResults = await mcp.send("tools/call", {
+    name: "search_products",
+    arguments: { query: "xyznonexistent" },
+  });
+  const noData = safeJson(extractText(noResults));
+  assert(noData.totalResults === 0, "Nonsense query returns 0 results");
+  console.log();
+
+  // ── 10. Validation bounds ──────────────────────────────────────────
   console.log("── Input Validation Bounds ─────────────────────────────");
   // Oversized customer_name should fail
   const longName = await mcp.send("tools/call", {
@@ -308,7 +329,7 @@ async function main() {
   assert(longPid.isError === true || longPid._error !== undefined, "Overlong product_id rejected");
   console.log();
 
-  // ── 10. Error-path sanitization ───────────────────────────────────
+  // ── 11. Error-path sanitization ───────────────────────────────────
   console.log("── Error Sanitization ──────────────────────────────────");
   // Non-existent SKU should return a clean error (not crash)
   const badSku = await mcp.send("tools/call", {
@@ -351,10 +372,9 @@ async function main() {
   );
   console.log();
 
-  // ── 11. State isolation (order mutation doesn't leak) ──────────────
+  // ── 12. State isolation (order mutation doesn't leak) ──────────────
   console.log("── State Isolation ─────────────────────────────────────");
   // After placing an order, the products list should reflect the new stock
-  // but the order should not be modifiable through the returned receipt
   const finalProducts = await mcp.send("tools/call", {
     name: "list_all_products",
     arguments: {},

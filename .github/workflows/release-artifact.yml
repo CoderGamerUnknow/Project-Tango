@@ -1,0 +1,110 @@
+name: Release artifact
+
+# Builds the installable tarball, proves the *installed* package works, and
+# attaches it to the release.
+#
+# This exists because uploading a binary asset from a contributor's machine is
+# not reliable: GitHub's asset endpoint stored the multipart envelope together
+# with the file on every framing tried from this host — a 22-byte probe came
+# back as 235 bytes starting `--<boundary>` — so a "successful" upload produced a
+# corrupt download. A runner uploads over GitHub's own path, and building the
+# tarball here means the asset is the one CI verified rather than one produced
+# alongside and never exercised.
+on:
+  release:
+    types: [published]
+  # Also runnable by hand to attach an artifact to an existing release:
+  #   gh workflow run release-artifact.yml -f tag=v3.1.0
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the artifact to, e.g. v3.1.0"
+        required: true
+
+jobs:
+  artifact:
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to upload a release asset. Not broader than that.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          # The changelog checks read tags, and this job checks the version in
+          # package.json against the tag it was asked for.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # A tarball named for one version and built from another is the kind of
+      # artifact that gets installed by the wrong people for months.
+      - name: Check the tag matches the version
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          VERSION=$(node -p "require('./package.json').version")
+          echo "tag=${TAG} package.json=${VERSION}"
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error::refusing to attach ${TAG}: package.json says ${VERSION}"
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack
+        run: npm pack
+
+      # The point of shipping a tarball is that someone can install it. This
+      # installs the packed file into a clean directory and drives the binary it
+      # ships — the artifact itself, not the checkout it was built from.
+      - name: Verify the installed package
+        run: |
+          set -euo pipefail
+          VERIFY=$(mktemp -d)
+          cd "$VERIFY"
+          npm init -y > /dev/null
+          npm install "$GITHUB_WORKSPACE"/project-tango-*.tgz --no-audit --no-fund
+          cat > smoke.mjs <<'SMOKE'
+          import assert from "node:assert/strict";
+          import { resolve } from "node:path";
+          import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+          import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+          const transport = new StdioClientTransport({
+            command: resolve("node_modules/.bin/project-tango"),
+            args: [],
+            env: { ...process.env, PROJECT_TANGO_DATA_DIR: process.env.VERIFY_DIR },
+          });
+          const client = new Client({ name: "artifact-smoke", version: "1.0.0" });
+          try {
+            await client.connect(transport);
+            const tools = await client.listTools();
+            assert.equal(tools.tools.length, 8, "the installed server must advertise all eight tools");
+            const { version } = await client.getServerVersion();
+            console.log(`installed package speaks MCP, version ${version}`);
+          } finally {
+            await client.close().catch(() => {});
+          }
+          SMOKE
+          VERIFY_DIR="$VERIFY/state" node smoke.mjs
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          FILE=$(ls project-tango-*.tgz)
+          echo "attaching ${FILE} (sha256 $(sha256sum "$FILE" | cut -d' ' -f1))"
+          # `--clobber` so re-running after a failed verification replaces the
+          # artifact rather than failing on the name.
+          gh release upload "$TAG" "$FILE" --clobber
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name) \(.size) bytes"'

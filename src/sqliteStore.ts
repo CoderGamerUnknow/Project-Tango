@@ -141,6 +141,21 @@ function sleep(ms: number): void {
   Atomics.wait(new Int32Array(shared), 0, 0, ms);
 }
 
+/** `SQLITE_CONSTRAINT`, extended and primary codes alike. */
+const SQLITE_CONSTRAINT_CODES = new Set([19, 1555]);
+
+/**
+ * Did SQLite reject the rows themselves, rather than fail to store them?
+ *
+ * Checked by code first and message second: the message is what a human reads,
+ * but relying on it alone would break on a wording change.
+ */
+function isConstraintViolation(error: unknown): boolean {
+  const errcode = (error as { errcode?: unknown }).errcode;
+  if (typeof errcode === "number" && SQLITE_CONSTRAINT_CODES.has(errcode)) return true;
+  return /constraint/i.test((error as Error)?.message ?? "");
+}
+
 /**
  * Open (or create) the store in `directory`.
  *
@@ -378,6 +393,20 @@ export function createSqliteStore(
           throw error;
         }
       } catch (error) {
+        // Two different failures arrive here and only one may be swallowed.
+        //
+        // The environment failing — a read-only disk, a full one, a handle that
+        // has been closed — is logged and tolerated, because this process is a
+        // background child of someone else's app and none of it is worth taking
+        // the tools down for.
+        //
+        // The *state* being rejected is not: SQLITE_CONSTRAINT means the rows we
+        // were asked to write are not storable, which is a defect in what we
+        // built, not in where we are storing it. Reporting that as a successful
+        // write is how a caller comes to believe an order was placed when the
+        // transaction behind it was rolled back — the exact "silent partial
+        // write" this project promises cannot happen.
+        if (isConstraintViolation(error)) throw error;
         log(`Project Tango: could not persist state to ${file}: ${(error as Error).message}`);
       }
     },

@@ -104,6 +104,24 @@ make a server notice that another process had written.
 - **`StateStore.changeToken?()`** — an optional cheap token that moves when
   another process committed. Optional on purpose: a backend that cannot detect
   another writer keeps the previous behaviour instead of re-reading blindly.
+- **Order ids carry their process id.** `nextOrderId` proved unique only within
+  one process: its sequence is module state, so two servers sharing a data
+  directory minted the *same* id for orders placed in the same millisecond. With
+  `orders.id` a primary key, the stored list then held that id twice and the
+  second write was rejected outright — one server's order could not be placed at
+  all. The pid closes the gap with no randomness: two live processes cannot share
+  one, and a recycled pid only collides with an id from a different millisecond.
+
+### Fixed
+
+- **A rejected save reported itself as a successful one.** `save()` swallowed
+  every write failure and logged it, which is right for the environment (a
+  read-only disk, a closed handle) and wrong for the data: `SQLITE_CONSTRAINT`
+  means the rows are not storable, which is a defect in what was built rather
+  than where it is stored. That combination is how a caller comes to believe an
+  order was placed when the transaction behind it was rolled back — the exact
+  "silent partial write" this project promises cannot happen. Constraint failures
+  are now rethrown; environmental ones still degrade with a warning.
 
 ## Why the `v2.0.0` trie was ported as ranking
 

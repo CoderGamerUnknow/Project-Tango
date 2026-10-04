@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
-import assert from "node:assert/strict";import {
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import {
   aggregateQuantitiesByProduct,
   buildOrder,
   computeSalesMetrics, findOrders, nextOrderId, normaliseOrderLookupFilters, ordersWithinWindow, parseOrderDate, resolveLookbackWindow, revenueByProduct, summarizeUnitsByProduct, unitsSoldForProduct, validateOrderLines } from "./orderAnalytics.js";
@@ -442,6 +445,50 @@ describe("nextOrderId", () => {
     // Regression: a bare Date.now() id handed back duplicate receipts.
     const ids = new Set(Array.from({ length: 500 }, () => nextOrderId(1_700_000_000_000)));
     assert.equal(ids.size, 500);
+  });
+
+  it("separates ids minted by two different processes", () => {
+    // The sequence is module state, so it restarts at one in every process. Two
+    // servers sharing a data directory that placed an order in the same
+    // millisecond would mint the same id, and `orders.id` being a primary key
+    // turned that into an order that could not be written at all.
+    //
+    // Both ids come from *fresh* child processes, because that is the only way
+    // this is the real scenario: comparing against an id from this process would
+    // differ merely because this process's counter has already advanced.
+    const NOW = 1_700_000_000_000;
+    const mint = () => {
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "-e",
+          `import("./src/orderAnalytics.ts").then((m) => {
+             process.stdout.write(m.nextOrderId(${NOW}));
+           });`,
+        ],
+        { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8" }
+      );
+      assert.equal(child.status, 0, `child process failed: ${child.stderr}`);
+      return child.stdout.trim();
+    };
+
+    const first = mint();
+    const second = mint();
+    assert.match(first, /^ord_/, `unexpected id shape: ${first}`);
+    assert.notEqual(
+      first,
+      second,
+      "two pristine processes minting their first id in the same millisecond must differ"
+    );
+  });
+
+  it("carries the process id, so the id says which server minted it", () => {
+    assert.ok(
+      nextOrderId(1_700_000_000_000).includes(process.pid.toString(36)),
+      "the id must identify its process, or a collision is untraceable"
+    );
   });
 });
 

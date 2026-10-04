@@ -262,6 +262,34 @@ describe("createSqliteStore", () => {
     });
   });
 
+  it("throws when the state itself is rejected, rather than reporting a write that never happened", async () => {
+    // A swallowed write is the worst kind: the caller is handed a success it can
+    // report to the user while the transaction behind it was rolled back. The
+    // environment failing is tolerable; the rows being unstorable is not.
+    await withTempDir((dir) => {
+      const store = createSqliteStore(dir)!;
+      try {
+        const duplicate = makeState({
+          orders: [
+            makeState().orders[0]!,
+            { ...makeState().orders[0]!, customerName: "Second Order With The Same Id" },
+          ],
+        });
+
+        assert.throws(
+          () => store.save(duplicate),
+          /constraint/i,
+          "a duplicate primary key must not be reported as a successful save"
+        );
+
+        // And nothing was half-written: the failed save left the store as it was.
+        assert.equal(store.load(), undefined, "a rejected snapshot must not reach the database");
+      } finally {
+        store.close?.();
+      }
+    });
+  });
+
   it("round-trips products, orders and line items", async () => {
     await withTempDir((dir) => {
       const store = createSqliteStore(dir)!;

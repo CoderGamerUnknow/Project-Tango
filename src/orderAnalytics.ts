@@ -454,11 +454,20 @@ export function buildOrder(
 /**
  * A bare `Date.now()` collides whenever two orders land in the same
  * millisecond, handing back two receipts with an identical id.
+ *
+ * The sequence alone is not enough once two servers share a data directory: it
+ * is module state, so both processes start counting at one and mint the same id
+ * for orders placed in the same millisecond. The stored order list then holds
+ * that id twice, and `orders.id` being a primary key means the second write is
+ * rejected outright — one server's order simply cannot be placed. The process id
+ * closes that gap without any randomness: two processes cannot share a pid while
+ * both are alive, and pids that are recycled only collide with ids from a
+ * different millisecond.
  */
 let orderSequence = 0;
 
 export function nextOrderId(nowMs: number = Date.now()): string {
-  return `ord_${nowMs.toString(36)}_${(++orderSequence).toString(36)}`;
+  return `ord_${nowMs.toString(36)}_${process.pid.toString(36)}_${(++orderSequence).toString(36)}`;
 }
 export interface OrderLookupFilters {
   orderId?: string | undefined;

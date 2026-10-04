@@ -25,6 +25,14 @@ jobs:
       - name: Install
         run: npm ci
 
+      # A tag pushed moments after its release commit is invisible to a checkout
+      # that ran earlier, and `src/docs.test.ts` fails hard on `unknown revision
+      # vX.Y.Z` — which is what happened the first time 3.1.0 was pushed, branch
+      # first. Refetching tags right before the suite closes that window without
+      # weakening the check: a tag that genuinely does not exist still fails.
+      - name: Fetch release tags
+        run: git fetch --tags --force --quiet
+
       - name: Typecheck (source + suites)
         run: npm run typecheck
 

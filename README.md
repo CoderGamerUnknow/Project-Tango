@@ -104,7 +104,7 @@ npm run test:coverage # the suite under coverage, with minimum thresholds
 npm run verify        # typecheck + lint + coverage + build, in one shot
 ```
 
-254 tests, no test framework to install — Node's built-in test runner drives
+255 tests, no test framework to install — Node's built-in test runner drives
 `tsx`. The
 suites are typechecked before they run (`pretest` → `npm run typecheck`), which
 covers them as well as the source; previously only the source was checked, so a

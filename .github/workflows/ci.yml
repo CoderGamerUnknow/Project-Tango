@@ -33,6 +33,20 @@ jobs:
       - name: Fetch release tags
         run: git fetch --tags --force --quiet
 
+      # A run triggered by a *tag* push checks out a detached HEAD, so no local
+      # `main` ref exists at all — even at full depth. `src/docs.test.ts` pins the
+      # changelog to the tags merged into `main`, and it dies on
+      # `fatal: malformed object name main`, which is why CI on v3.1.1 and v3.1.2
+      # both failed while CI on the same commit pushed to `main` passed. Fetching
+      # the branch gives the test the ref it means; guarded, because fetching into
+      # the branch that is currently checked out is refused.
+      - name: Ensure a local main ref for the changelog lineage checks
+        run: |
+          if ! git rev-parse --verify --quiet main >/dev/null; then
+            git fetch --force --quiet origin refs/heads/main:refs/heads/main
+          fi
+          git tag -l --merged main v* | tail -3
+
       - name: Typecheck (source + suites)
         run: npm run typecheck
 

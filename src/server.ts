@@ -60,7 +60,7 @@ const CATEGORY_ARG_DOC =
 export function createServer(dataProvider: DataProvider): McpServer {
   const server = new McpServer({
     name: "project-tango",
-    version: "3.1.1",
+    version: "3.1.2",
   });
 
   server.registerTool(

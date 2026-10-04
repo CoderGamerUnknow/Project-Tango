@@ -208,9 +208,9 @@ catalog: the server would list all thirteen and then refuse to sell one of them,
 committing the shortfall so it survived every restart. **3.1.1 repairs this on
 its own** — starting it re-adds the missing seed products, and the first write
 that follows saves the repaired catalog back, so there is no manual step.
-Install 3.1.1 and restart. Nothing you placed is lost: orders recorded against
-the missing products are still in the database and resolve again once the
-products are back. See the
+Upgrade to 3.1.2 or later and restart. Nothing you placed is lost: orders
+recorded against the missing products are still in the database and resolve
+again once the products are back. See the
 [3.1.0 release notes](https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.0).
 
 The store is deliberately forgiving, because this process is a background child of

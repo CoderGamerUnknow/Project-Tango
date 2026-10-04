@@ -11,6 +11,53 @@ only published releases, so `minor`/`patch` numbers here mean published tags.
 > as the durable store, respectively — so the feature list below is a record of
 > what `v2.0.0` holds, not of what `main` lacks.
 
+## [3.1.2] — 2026-10-04
+
+Tightens the seam that 3.1.1 left loose, and proves it holds under load.
+**One breaking change**, to the `StateStore` interface rather than to anything an
+MCP client can see: no tool name, parameter or response field changed, and
+upgrading is a normal reinstall.
+
+### Changed
+
+- **`StateStore.changeToken` is now required — breaking for backend authors.**
+  3.1.1 fixed a server that kept serving a catalog another process had
+  replaced, and made the fix reachable by *omitting* an optional member: a
+  backend added later could leave `changeToken` off the interface and silently
+  reinstate the exact defect, with nothing to notice it. Every backend this
+  project can return already provided one, so no shipped behaviour changes. A
+  backend that genuinely cannot detect another writer must now say so with
+  `stableToken(reason)` — the limitation becomes a decision someone wrote down
+  rather than a gap nobody noticed. The requirement is only that a rival's
+  commit is *detectable*: a token that also moves on the provider's own writes is
+  merely less efficient, which is what the JSON backend's `size:mtime` token does.
+  Correctness never depends on which kind a backend provides.
+
+### Added
+
+- **Freshness verified under load.** Two real server processes, one data
+  directory, forty commits spread across four products while the reader serves
+  hundreds of interleaved `list_all_products` calls. The assertions are the ones
+  that only fail once the two have had time to drift apart: no read trails a
+  committed write by more than one commit, the reader is current within three
+  reads of the writer going quiet, it follows the stream rather than jumping once
+  at the end, and it never serves a catalog mid-write or reports stock moving
+  backwards. Both ways of breaking it were confirmed to fail the suite — pinning
+  the token, and refreshing only one read in sixty.
+- **A performance guard on the token check.** The reload the token exists to
+  avoid is the expensive path; if the check ever got slower than the reload it
+  would be pure overhead. A guard holds `changeToken` at least 20x cheaper than a
+  full load on the shipped dataset (measured ~72x).
+
+### Fixed
+
+- **The 3.1.0 release record was wrong in a way that mattered.** Its body had
+  stray blank lines from the original extraction, and — more importantly — it
+  described two data-loss defects without telling anyone who installed it that
+  they were carrying them. Both it and 3.1.1's now lead with the upgrade path: if
+  your stored state holds fewer products than the seed catalog, 3.1.1 repairs it
+  on its own, with no manual step and nothing you placed lost.
+
 ## [3.1.1] — 2026-10-04
 
 Bug fixes and release tooling. No tool names, parameters or response fields
@@ -273,6 +320,7 @@ also has seven features `v2.0.0` lacks: `find_orders`, `reset_demo_state`, the
 category scoping on three tools, the sales trend series, durable restart-safe
 persistence, the injectable `createServer` seam, and the lint/coverage/CI gates.
 
+[3.1.2]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.2
 [3.1.1]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.1
 [3.1.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.0
 [3.0.1]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.0.1

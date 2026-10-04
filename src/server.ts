@@ -57,10 +57,21 @@ const CATEGORY_ARG_DOC =
   "Restrict to a single category, e.g. 'tech', 'apparel', or 'home'. Case-insensitive. " +
   "Omit to cover the whole catalog.";
 
+/**
+ * The version this server reports to every MCP client.
+ *
+ * Exported, and named, because it is a claim in three places at once — this
+ * line, `package.json`, and the changelog — and nothing held them together: the
+ * version was previously a bare literal here that a release could bump in
+ * `package.json` and forget here, which would ship a tarball whose binary
+ * announces a different version to every client that connects to it.
+ */
+export const SERVER_VERSION = "3.1.2";
+
 export function createServer(dataProvider: DataProvider): McpServer {
   const server = new McpServer({
     name: "project-tango",
-    version: "3.1.2",
+    version: SERVER_VERSION,
   });
 
   server.registerTool(

@@ -8,11 +8,13 @@ import {
   STATE_VERSION,
   createFileStore,
   createMemoryStore,
+  durabilityBlocker,
   resolveStateStore,
   stableToken,
   type PersistedState,
   type StateStore,
 } from "./storage.js";
+import { MIN_NODE_FOR_SQLITE } from "./sqliteStore.js";
 import type { Order, Product } from "./types.js";
 
 function makeState(overrides: Partial<PersistedState> = {}): PersistedState {
@@ -450,5 +452,67 @@ describe("resolveStateStore", () => {
   it("ignores a data directory when persistence is disabled", async () => {
     const store = await resolveStateStore({ PROJECT_TANGO_PERSIST: "0", PROJECT_TANGO_DATA_DIR: "/tmp/x" });
     assert.match(store.description, /in-memory/);
+  });
+});
+
+/**
+ * The runtime floor.
+ *
+ * This is the one degradation that refuses to start rather than warning, and the
+ * tests below are the reason it stays that way. The suite runs on a Node that
+ * *has* `node:sqlite`, so the fatal branch is reached by injecting the runtime's
+ * answer instead — the same substitution `sqliteStore.test.ts` uses to stand in
+ * for a runtime it cannot otherwise provide.
+ */
+describe("durabilityBlocker", () => {
+  const noSqlite = false;
+  const withSqlite = true;
+
+  it("refuses to start on a runtime with no built-in SQLite", async () => {
+    const blocker = await durabilityBlocker({}, noSqlite);
+    assert.ok(blocker, "a runtime that cannot persist must not be allowed to serve");
+    // The message has to carry the actual fix, not just the diagnosis: the
+    // reader of this is staring at a server that refused to launch.
+    assert.match(blocker, /cannot start on Node/);
+    assert.match(blocker, new RegExp(MIN_NODE_FOR_SQLITE.replace(/\./g, "\\.")), "must name the floor");
+    assert.match(blocker, /PROJECT_TANGO_STORE=json/, "must offer the narrower backend as a way forward");
+    assert.match(blocker, /PROJECT_TANGO_PERSIST=0/, "must offer the opt-out as a way forward");
+  });
+
+  it("stays out of the way on a runtime that can persist", async () => {
+    assert.equal(
+      await durabilityBlocker({}, withSqlite),
+      undefined,
+      "the default path on a supported runtime must not be blocked"
+    );
+  });
+
+  it("yields to a deliberate request for the JSON backend", async () => {
+    // No `node:sqlite` here, and it does not matter: the operator chose a
+    // backend that works, so their choice outranks the floor.
+    assert.equal(await durabilityBlocker({ PROJECT_TANGO_STORE: "json" }, noSqlite), undefined);
+    assert.equal(await durabilityBlocker({ PROJECT_TANGO_STORE: "JSON" }, noSqlite), undefined);
+    assert.equal(await durabilityBlocker({ PROJECT_TANGO_STORE: " json " }, noSqlite), undefined);
+  });
+
+  it("yields to a deliberate request for no persistence", async () => {
+    assert.equal(await durabilityBlocker({ PROJECT_TANGO_PERSIST: "0" }, noSqlite), undefined);
+    assert.equal(await durabilityBlocker({ PROJECT_TANGO_PERSIST: " 0 " }, noSqlite), undefined);
+  });
+
+  it("does not mistake a near-miss variable value for an opt-out", async () => {
+    // `PERSIST=false` and `STORE=sqlite` are not the escape hatches. Reading them
+    // as such would silently disable the check on a runtime that needs it —
+    // the failure mode being guarded against, reintroduced by a typo.
+    assert.ok(await durabilityBlocker({ PROJECT_TANGO_PERSIST: "false" }, noSqlite));
+    assert.ok(await durabilityBlocker({ PROJECT_TANGO_PERSIST: "" }, noSqlite));
+    assert.ok(await durabilityBlocker({ PROJECT_TANGO_STORE: "sqlite" }, noSqlite));
+  });
+
+  it("asks the real runtime when it is not told otherwise", async () => {
+    // The no-argument path is what `src/index.ts` uses, so it must consult the
+    // runtime rather than assume. This suite runs on a Node with `node:sqlite`,
+    // so the honest answer here is "no blocker".
+    assert.equal(await durabilityBlocker(), undefined);
   });
 });

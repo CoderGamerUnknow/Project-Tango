@@ -67,7 +67,10 @@ implementation without a compile error.
 
 ## Prerequisites
 
-- **Node.js 18 or later** (`node -v` to check)
+- **Node.js 22.5 or later** (`node -v` to check) — the floor is `node:sqlite`,
+  the built-in database the server stores its state in. On an older runtime the
+  server **refuses to start** and says why, rather than silently running without
+  persistence; see [Runtime floor](#runtime-floor).
 - npm (ships with Node)
 
 ---
@@ -104,7 +107,7 @@ npm run test:coverage # the suite under coverage, with minimum thresholds
 npm run verify        # typecheck + lint + coverage + build, in one shot
 ```
 
-271 tests, no test framework to install — Node's built-in test runner drives
+287 tests, no test framework to install — Node's built-in test runner drives
 `tsx`. The
 suites are typechecked before they run (`pretest` → `npm run typecheck`), which
 covers them as well as the source; previously only the source was checked, so a
@@ -154,6 +157,13 @@ The suite runs in five layers:
   `createServer(provider)` against a stub `DataProvider` over the SDK's
   in-memory transport — the proof that swapping providers needs no process and
   no module rewiring.
+- **Bootstrap** (`src/bootstrap.test.ts`) launches `src/index.ts` as the real
+  child process a user launches, because it is the one module no test can
+  import: it takes over stdout and calls `process.exit`. It covers the
+  [runtime floor](#runtime-floor) end to end — that a too-old runtime exits
+  non-zero with an explanation, answers nothing on stdout, and does not even
+  create its data directory, while both documented escapes (JSON backend,
+  `PROJECT_TANGO_PERSIST=0`) start normally.
 - **Docs** (`src/docs.test.ts`) reads the README and changelog as text and pins
   their claims — dataset figures, structure tree, tool names, release headings,
   release dates, and the divergent `v2.0.0` lineage — to the code, the data and
@@ -257,6 +267,36 @@ it avoids (measured ~72x on the shipped dataset).
 and its guarantee is deliberately narrower: it publishes one process's complete
 snapshot (never a torn file) but is still last-writer-wins across processes,
 because `load()`/`save()` cannot be made atomic between two independent copies.
+
+### Runtime floor
+
+Most failures to persist are *environmental* — an unwritable directory, a full
+disk, a database another process is holding — and those degrade to a warning on
+stderr, because a warning is recoverable where a dead server is not.
+
+One is not: a runtime with no `node:sqlite`. That will still be true tomorrow,
+and a server that starts anyway accepts orders and discards every one of them at
+exit, reporting it on a stderr line the launching MCP client throws away. It is
+the single worst thing a store whose headline feature is *"state survives a
+restart"* can do, and it is silent. So the server checks before it connects and
+**refuses to start**, naming the fix:
+
+```
+$ npx project-tango
+Project Tango cannot start on Node 18.20.4.
+
+This runtime has no built-in SQLite, which needs Node 22.5.0 or later. The durable
+store this server is built around is therefore unavailable, and starting anyway
+would accept orders and discard every one of them when the process exits — silently,
+because the fallback warning goes to a stderr line the launching MCP client throws away.
+…
+```
+
+Either upgrade Node, or set `PROJECT_TANGO_STORE=json` to accept the narrower
+durability guarantee above, or set `PROJECT_TANGO_PERSIST=0` to say you meant to
+run without persistence. `engines.node` is `>=22.5.0` to match, but npm only
+warns on an engine mismatch by default, so this check is the one that actually
+holds the line. `src/storage.test.ts` pins all three escape hatches.
 
 ## Connecting Project Tango to an MCP client
 
@@ -403,6 +443,51 @@ concern — catalog, orders, restock, copy — because a single 750-line file
 covering all four is none of them; `conventions.ts` holds only the rules more
 than one of them follows, so a shared rule has exactly one owner instead of one
 copy per module.
+
+## Releasing
+
+The order matters more than it looks, because two of these steps are checked
+against each other and getting them backwards fails *after* the release is
+already public.
+
+```bash
+npm run release:check 3.1.3   # before you tag anything
+```
+
+1. **Prepare.** Bump `package.json`, `package-lock.json` (`npm install
+   --package-lock-only`) and `SERVER_VERSION` in `src/server.ts`. Write the
+   `## [3.1.3] — YYYY-MM-DD` changelog section and its `[3.1.3]:` link
+   definition. `docs.test.ts` refuses a release whose heading has no tag and
+   whose tag date is not the heading's date.
+2. **Verify locally.** `npm run verify` — typecheck, lint, coverage, build.
+3. **Commit, then tag the commit.**
+   ```bash
+   git commit -am "Release v3.1.3: ..."
+   git tag -a v3.1.3 -m "Project Tango v3.1.3"
+   ```
+4. **Push the tag *before* the branch.** This is the one that bites. A tag run
+   checks out a detached HEAD and reads `main`'s tag history; if the branch has
+   not landed, `docs.test.ts` dies on `fatal: malformed object name main` and
+   `unknown revision vX.Y.Z`. That is how the 3.1.0, 3.1.1 and 3.1.2 tag runs
+   all went red while the same commits passed on `main`.
+   ```bash
+   git push origin v3.1.3      # tag first
+   git push origin main        # then the branch
+   ```
+5. **Wait for the tag run to go green before publishing.** A release published
+   over a red run is a published release nobody has verified, and it cannot be
+   un-published. CI now runs `scripts/release-check.mjs` on tag pushes, so a
+   mismatch fails there rather than in a bug report.
+6. **Publish** with notes generated from the changelog section (so the two
+   cannot drift), and let `release-artifact.yml` attach the tarball. The
+   artifact is built *and installed and booted* on the runner before upload —
+   an asset uploaded from a contributor's machine has silently corrupted every
+   file it touched on this project.
+7. **Confirm** the tarball is attached, then delete the temporary branch if you
+   used one. CI also runs on Windows; both legs must be green.
+
+`scripts/release-check.mjs` is the mechanical half of steps 1 and 5, and it is
+what CI runs on a tag push.
 
 ## License
 

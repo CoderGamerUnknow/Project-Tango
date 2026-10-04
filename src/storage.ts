@@ -109,6 +109,70 @@ type Logger = (message: string) => void;
 
 const noopLogger: Logger = () => {};
 
+/**
+ * A reason this server must refuse to start, or `undefined` if it may run.
+ *
+ * Only one condition is fatal, and it is fatal because it is *permanent*: a
+ * runtime with no `node:sqlite`, configured to use the default backend. Every
+ * other degradation — an unwritable data directory, a corrupt database, a
+ * read-only filesystem — is environmental, might clear on its own, and is
+ * reported as a warning instead (see `resolveStateStore`), because this process
+ * is a background child of someone else's app and a warning is recoverable
+ * where a dead server is not.
+ *
+ * An unsupported Node version is different in kind. It will still be unsupported
+ * tomorrow, and starting anyway means the server accepts orders and discards
+ * every one of them at exit while reporting "State: in-memory" to a stderr line
+ * the launching MCP client discards. That is the single worst thing a store
+ * whose headline feature is *"state survives a restart"* can do, and it is
+ * silent. `engines.node` catches it at install time as a warning npm lets
+ * through; this catches it at the only moment it can still be acted on.
+ *
+ * `supportsSqlite` is injectable so the fatal branch is testable on a runtime
+ * that does have SQLite, which is the only runtime this suite runs on.
+ */
+export async function durabilityBlocker(
+  env: NodeJS.ProcessEnv = process.env,
+  supportsSqlite?: boolean
+): Promise<string | undefined> {
+  // The two escape hatches come first: either one is a decision the operator
+  // made on purpose, and a deliberate choice is never a reason to refuse.
+  if (env.PROJECT_TANGO_PERSIST?.trim() === "0") return undefined;
+  if (env.PROJECT_TANGO_STORE?.trim().toLowerCase() === "json") return undefined;
+
+  const available = supportsSqlite ?? (await sqliteAvailableOnThisRuntime());
+  if (available) return undefined;
+
+  const { MIN_NODE_FOR_SQLITE } = await import("./sqliteStore.js");
+  const version = process.versions.node;
+  return [
+    `Project Tango cannot start on Node ${version}.`,
+    ``,
+    `This runtime has no built-in SQLite, which needs Node ${MIN_NODE_FOR_SQLITE} or later. The durable`,
+    `store this server is built around is therefore unavailable, and starting anyway would accept orders`,
+    `and discard every one of them when the process exits — silently, because the fallback warning goes`,
+    `to a stderr line the launching MCP client throws away.`,
+    ``,
+    `Fix it with either:`,
+    `  • upgrade to Node ${MIN_NODE_FOR_SQLITE} or later (recommended), or`,
+    `  • set PROJECT_TANGO_STORE=json to use the whole-snapshot JSON file instead, which does persist`,
+    `    but is last-writer-wins across processes.`,
+    ``,
+    `To run with no persistence on purpose, set PROJECT_TANGO_PERSIST=0.`,
+  ].join("\n");
+}
+
+/**
+ * Whether this runtime can host the default backend.
+ *
+ * Loaded through the same late, typed import as `loadSqliteStore` below, so
+ * `storage.ts` keeps no static cycle with the store that imports it back.
+ */
+async function sqliteAvailableOnThisRuntime(): Promise<boolean> {
+  const sqlite = await import("./sqliteStore.js");
+  return sqlite.sqliteAvailable();
+}
+
 /** Envelope check — a file that parses is not necessarily a state file we wrote. */
 function isPersistedState(value: unknown): value is PersistedState {
   if (typeof value !== "object" || value === null) return false;

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
@@ -389,6 +390,25 @@ describe("persistence", () => {
       const CONVERGENCE_BOUND = 3;
       // Enough headroom that the reader is never what ends the run.
       const READ_CAP = WRITES * 40;
+      // Pause between reads, so the writer can get ahead between two of them.
+      //
+      // Without this the bound below is decorative. Measured on this project, a
+      // committed order costs ~4.3x a `list_all_products` read, so with both
+      // loops running flat out the writer commits only ~0.17 times per read and
+      // *at most one* commit ever lands between two consecutive reads. Lag can
+      // therefore never accumulate, `worstLag` is structurally pinned at 0, and
+      // the test would pass just as happily against a server that refreshed its
+      // catalog once every ten reads — which is the precise defect the bound
+      // exists to catch. (Raising the writer's concurrency did not help: eight
+      // orders in flight still only put two commits in a single read gap.)
+      //
+      // A pause is not a fudge — an MCP client is never zero-latency. There is a
+      // process hop and a model deciding what to ask next between two calls, so
+      // a few milliseconds per read is if anything generous. At 4ms roughly
+      // three quarters of read gaps carry two or more commits, which is the
+      // regime where the bound can actually distinguish a fresh reader from a
+      // lazy one. `pressure` below asserts we really are in that regime.
+      const READ_THINK_MS = 4;
 
       // What the writer has committed, per product. The reader's job is to match
       // it; this map is the truth it is measured against.
@@ -405,14 +425,25 @@ describe("persistence", () => {
       let readCount = 0;
       let worstLag = 0;
       let failedRead: Error | undefined;
+      // Commits that landed between one read and the next. This is the
+      // quantity that decides whether the lag bound means anything: if it never
+      // exceeds 1, no reader could ever violate `MAX_LAG_COMMITS`, and the test
+      // is measuring its own timing rather than the server.
+      const commitGaps: number[] = [];
 
       // Read continuously while the writer commits underneath. Nothing waits for
       // the other side, which is the whole point.
       const reading = (async () => {
+        let commitsAtLastRead = 0;
         while (removed < TOTAL_REMOVED && readCount < READ_CAP) {
           try {
             const listed = parse(await reader.callTool({ name: "list_all_products", arguments: {} }));
             assert.equal(listed.count, 13, "a read mid-write must still return a whole catalog");
+            // `removed` only moves on a *committed* order, so this is exactly the
+            // number of commits the writer finished while this read was in
+            // flight — the lag the reader had to absorb before serving.
+            commitGaps.push(removed / QTY - commitsAtLastRead);
+            commitsAtLastRead = removed / QTY;
             for (const id of POOL) {
               const stock = stockOf(listed, id);
               assert.ok(stock >= 0, `stock must never be observed negative (${id})`);
@@ -435,6 +466,7 @@ describe("persistence", () => {
             failedRead = error instanceof Error ? error : new Error(String(error));
             return;
           }
+          if (READ_THINK_MS > 0) await delay(READ_THINK_MS);
         }
       })();
 
@@ -475,6 +507,25 @@ describe("persistence", () => {
       assert.ok(
         worstLag <= MAX_LAG_COMMITS,
         `a read was ${worstLag} commits behind the writer; the bound is ${MAX_LAG_COMMITS}`
+      );
+
+      // The bound above is only worth anything if the run ever presented the
+      // reader with a real gap to absorb. This is the assertion that keeps the
+      // soak honest: it fails when the two sides are so badly paced that lag
+      // cannot accumulate at all, which is the state in which the test would
+      // report a healthy server while proving nothing about it.
+      //
+      // Without this, slowing the writer or speeding the reader turns the whole
+      // case into a tautology — and nothing about the *code* would have
+      // changed. A guard is a promise about what was exercised, not only about
+      // what came out.
+      const pressured = commitGaps.filter((gap) => gap >= 2).length;
+      assert.ok(
+        pressured > 0,
+        `no read ever had to absorb two or more commits (${commitGaps.length} gaps, ` +
+          `max ${Math.max(0, ...commitGaps)}) — the reader was never actually behind, so ` +
+          `this run cannot distinguish a fresh reader from a lazy one. Raise READ_THINK_MS ` +
+          `or make the writes cheaper.`
       );
 
       // The property that actually matters, stated as a bound: once the writer

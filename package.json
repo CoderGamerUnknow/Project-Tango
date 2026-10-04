@@ -21,10 +21,11 @@
     "pretest": "npm run typecheck",
     "test": "node --import tsx --test --test-global-setup=src/testGlobalSetup.ts \"src/**/*.test.ts\"",
     "verify": "npm run typecheck && npm run lint && npm run test:coverage && npm run build",
+    "release:check": "node scripts/release-check.mjs",
     "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.5.0"
   },
   "keywords": [
     "mcp",

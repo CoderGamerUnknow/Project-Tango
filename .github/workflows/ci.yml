@@ -6,7 +6,29 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Windows is not a formality here. The durable store is filesystem and
+    # SQLite work, and it is developed on Windows, where it has already broken
+    # in ways Linux never showed: `rmSync` failing with EPERM on an open SQLite
+    # directory, `tar` reading a `C:` path as a remote host, and test files
+    # whose paths do not survive being passed through a shell. The published
+    # tarball is built on Linux and installed on Windows by most of its users,
+    # so Linux-only CI was checking a platform nobody ships on and skipping the
+    # one they do.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Not fail-fast: the two platforms fail independently, and a Windows-only
+      # breakage should not hide the Linux result (or the reverse) behind a
+      # cancelled job.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    # Every `run:` block below is bash, on both platforms. The steps lean on
+    # `pipefail`, `git fetch` refspecs and `grep -oE`, none of which behave the
+    # same under PowerShell — and a step that silently means something different
+    # on one leg is worse than no step at all.
+    defaults:
+      run:
+        shell: bash
     steps:
       # `fetch-depth: 0` is required, not a convenience: `src/docs.test.ts` pins
       # CHANGELOG.md to the release history — it reads the tags and each tag's
@@ -47,6 +69,16 @@ jobs:
           fi
           git tag -l --merged main v* | tail -3
 
+      # The release gate, run against whatever is being released. On a tag push
+      # this is the authoritative check: it confirms the tag matches the
+      # version, the changelog documents it with the tag's own date, and the
+      # commit is reachable from `main` — the three things that have each turned
+      # a tag run red after the release was already published. On a branch push
+      # it has nothing to check yet and says so.
+      - name: Release check
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/release-check.mjs "${GITHUB_REF_NAME#v}"
+
       - name: Typecheck (source + suites)
         run: npm run typecheck
 
@@ -54,7 +86,10 @@ jobs:
         run: npm run lint
 
       # Runs the whole suite under coverage with minimum thresholds — a test
-      # run that regresses coverage fails here, not silently.
+      # run that regresses coverage fails here, not silently. On Windows this is
+      # also the leg that exercises the store's filesystem behaviour: atomic
+      # saves, directory creation, and the cleanup that has to survive an open
+      # database handle.
       - name: Test with coverage floor
         run: |
           set -o pipefail
@@ -72,5 +107,118 @@ jobs:
             exit 1
           fi
 
+      # A real install from the packed tarball, on both platforms. `npm run
+      # build` proves the source compiles; it does not prove the published
+      # artifact has its entry point, its `bin` wiring and its dependency tree
+      # intact. The release workflow does this before publishing, but only after
+      # a tag exists — so on the overwhelming majority of commits the packaging
+      # was never checked at all.
       - name: Build
         run: npm run build
+
+      # Confirms the packed tarball speaks MCP, not merely that it exists. A
+      # broken `bin`, a missing runtime dependency in the published files, or a
+      # `dist/index.js` that throws on load would pass every step above and still
+      # leave every user with a server that cannot start.
+      - name: Pack, install and boot the published tarball
+        run: |
+          set -o pipefail
+          npm pack --pack-destination "$RUNNER_TEMP" 2>&1 | tee pack.log
+          TGZ=$(ls "$RUNNER_TEMP"/project-tango-*.tgz)
+          echo "packed: $TGZ"
+
+          # A clean prefix outside the checkout, so this resolves from the
+          # tarball alone and can never quietly fall back to this repo's
+          # node_modules — which would make the whole step a no-op.
+          rm -rf "$RUNNER_TEMP/consumer"
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$TGZ" 2>&1 | tee install.log
+
+          test -f node_modules/project-tango/dist/index.js
+          node -p "'installed version: ' + require('./node_modules/project-tango/package.json').version"
+
+          cat > smoke.mjs <<'SMOKE'
+          // Speaks MCP to the *installed* server over stdio and asserts it
+          // initializes and lists its tools. Written inline so it runs against
+          // the tarball's own dependency tree.
+          import { spawn } from "node:child_process";
+          import { mkdtempSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { join } from "node:path";
+
+          const dir = mkdtempSync(join(tmpdir(), "tango-smoke-"));
+          const child = spawn(process.execPath, ["node_modules/project-tango/dist/index.js"], {
+            env: { ...process.env, PROJECT_TANGO_DATA_DIR: dir },
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+
+          let buffer = "";
+          const replies = new Map();
+          child.stdout.on("data", (chunk) => {
+            buffer += chunk;
+            let nl;
+            while ((nl = buffer.indexOf("\n")) >= 0) {
+              const line = buffer.slice(0, nl).trim();
+              buffer = buffer.slice(nl + 1);
+              if (!line) continue;
+              const msg = JSON.parse(line);
+              if (msg.id !== undefined) replies.set(msg.id, msg);
+            }
+          });
+          child.stderr.on("data", (d) => process.stderr.write(d));
+
+          const call = (id, method, params) =>
+            child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+
+          call(1, "initialize", {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "ci-smoke", version: "1" },
+          });
+
+          const deadline = Date.now() + 30000;
+          while (!replies.has(1) && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          const init = replies.get(1);
+          if (!init?.result) {
+            console.error("the installed server never answered initialize");
+            process.exit(1);
+          }
+          console.log("serverInfo:", JSON.stringify(init.result.serverInfo));
+          console.log("protocol:", init.result.protocolVersion);
+
+          child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+          call(2, "tools/list", {});
+          const listDeadline = Date.now() + 30000;
+          while (!replies.has(2) && Date.now() < listDeadline) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          const tools = replies.get(2)?.result?.tools ?? [];
+          console.log("tools:", tools.length);
+          if (tools.length < 8) {
+            console.error(`expected the full tool surface, got ${tools.length}`);
+            process.exit(1);
+          }
+
+          // A write must survive the process it was made in — the whole promise
+          // of the package, and the one thing a smoke test can check cheaply.
+          call(3, "tools/call", {
+            name: "simulate_order_placement",
+            arguments: { customer_name: "CI Smoke", items: [{ product_id: "prod_001", quantity: 1 }] },
+          });
+          const writeDeadline = Date.now() + 30000;
+          while (!replies.has(3) && Date.now() < writeDeadline) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          if (replies.get(3)?.result?.isError) {
+            console.error("the installed server could not place an order");
+            process.exit(1);
+          }
+          child.kill();
+          console.log("OK: the packed tarball installs, initializes and writes");
+          process.exit(0);
+          SMOKE
+          node smoke.mjs

@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { findOrders, normaliseOrderLookupFilters } from "./orderAnalytics.js";
+import { SERVER_VERSION } from "./server.js";
+import { MIN_NODE_FOR_SQLITE } from "./sqliteStore.js";
 import { TOOL } from "./toolNames.js";
 
 /**
@@ -57,6 +59,95 @@ describe("README figures", () => {
     const claim = readme.match(/^(\d+) tests,/m);
     assert.ok(claim, "README must state how many tests the suite runs");
     assert.ok(Number(claim[1]) >= 100, `implausible test count: ${claim[1]}`);
+  });
+
+  it("states the runtime floor the server actually enforces", () => {
+    // The README used to promise Node 18 while the store needed 22.5 and
+    // degraded to memory-only — so the prerequisite, the `engines` field and the
+    // check in `durabilityBlocker` were three separate claims about one floor,
+    // and nothing held them together. A user on Node 18 was told they were
+    // supported, and lost every order they placed.
+    const claimed = readme.match(/\*\*Node\.js (\d+(?:\.\d+)*) or later\*\*/);
+    assert.ok(claimed, "README must state the minimum Node version");
+
+    // Compared as versions rather than as strings: "22.5" and "22.5.0" are the
+    // same floor written two ways, and a text comparison would fail on prose
+    // style instead of on the claim actually being wrong.
+    const asTuple = (v: string): [number, number] => {
+      const parts = v.split(".").map(Number);
+      return [parts[0] ?? 0, parts[1] ?? 0];
+    };
+    const [claimedMajor, claimedMinor] = asTuple(claimed[1]!);
+    const [floorMajor, floorMinor] = asTuple(MIN_NODE_FOR_SQLITE);
+
+    assert.ok(
+      claimedMajor > floorMajor || (claimedMajor === floorMajor && claimedMinor >= floorMinor),
+      `README promises Node ${claimed[1]}+, but the durable store needs ${MIN_NODE_FOR_SQLITE}+ — ` +
+        `a user on anything older silently loses every write`
+    );
+  });
+});
+
+describe("package metadata", () => {
+  it("ships a release gate that CI actually runs", () => {
+    // The checklist in the README is only as good as the fact that following it
+    // is checked. Two releases in a row went out over a red tag run, so the
+    // ordering rule is worth asserting mechanically: the gate exists, it is
+    // wired to a real npm script, and a tag push actually invokes it.
+    const script = join(ROOT, "scripts", "release-check.mjs");
+    assert.ok(existsSync(script), "scripts/release-check.mjs is missing");
+
+    const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    assert.match(
+      pkgJson.scripts?.["release:check"] ?? "",
+      /release-check\.mjs/,
+      "the release gate must be runnable as `npm run release:check`"
+    );
+
+    const ci = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
+    assert.match(ci, /release-check\.mjs/, "CI must invoke the release gate");
+    assert.match(
+      ci,
+      /if: startsWith\(github\.ref, 'refs\/tags\/v'\)/,
+      "the release gate must run on tag pushes — that is the run that catches a bad release"
+    );
+  });
+
+  it("keeps the release script out of the published tarball", () => {
+    // `files: ["dist"]` is what keeps the package small, and a release script
+    // shipping inside it would be dead weight a user could run and be
+    // surprised by. This pins the intent so a future `files` change is a
+    // decision rather than an accident.
+    const pkgJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
+      files?: string[];
+    };
+    assert.ok(pkgJson.files?.includes("dist"), "the published files list must keep dist");
+    assert.ok(
+      !pkgJson.files?.some((f) => f.startsWith("scripts")),
+      "scripts/ is a development tool and must not be published"
+    );
+  });
+  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
+    engines?: { node?: string };
+    version?: string;
+  };
+
+  it("declares the same Node floor the code refuses to run below", () => {
+    // npm only *warns* on an engine mismatch unless `engine-strict` is set, so a
+    // wrong `engines` is a bad first impression rather than a broken install.
+    // Still worth holding: it is the version a reader checks before anything
+    // else, and it was three majors below what the server needs.
+    assert.equal(
+      pkg.engines?.node,
+      `>=${MIN_NODE_FOR_SQLITE}`,
+      `engines.node must be >=${MIN_NODE_FOR_SQLITE}, matching MIN_NODE_FOR_SQLITE`
+    );
+  });
+
+  it("declares a version the server reports", () => {
+    assert.equal(pkg.version, SERVER_VERSION, "package.json and the server's reported version disagree");
   });
 });
 

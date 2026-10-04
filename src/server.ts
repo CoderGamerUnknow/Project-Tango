@@ -66,7 +66,7 @@ const CATEGORY_ARG_DOC =
  * `package.json` and forget here, which would ship a tarball whose binary
  * announces a different version to every client that connects to it.
  */
-export const SERVER_VERSION = "3.1.2";
+export const SERVER_VERSION = "3.2.0";
 
 export function createServer(dataProvider: DataProvider): McpServer {
   const server = new McpServer({

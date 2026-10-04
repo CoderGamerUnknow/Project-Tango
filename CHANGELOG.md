@@ -11,6 +11,79 @@ only published releases, so `minor`/`patch` numbers here mean published tags.
 > as the durable store, respectively — so the feature list below is a record of
 > what `v2.0.0` holds, not of what `main` lacks.
 
+## [3.2.0] — 2026-10-04
+
+Four gaps between what this project claimed and what it actually verified.
+**One breaking change**, and it is the honest kind: the server now refuses to
+start on a runtime that cannot durably store your data. No tool name, parameter
+or response field changed.
+
+### Changed
+
+- **Node 22.5 is now the floor — breaking for anyone on Node 18.** The package
+  claimed `engines.node >= 18.0.0` while `node:sqlite` has only existed since
+  22.5, and it claimed that in the one field `npm` checks at install time. So a
+  Node 18 user got a clean install, a working `--help`, and then a server that
+  failed at its first write with a stack trace about a module that does not
+  exist in their runtime — after they had already pointed a real agent at it.
+  The claim is now true (`>=22.5.0`), and on an older runtime the server exits 1
+  with a plain sentence explaining which version it needs and why, *before* it
+  creates a data directory or prints a mock-data warning that would have sent
+  them looking in the wrong place.
+- **Two escape hatches, for the runtimes that cannot be upgraded.** Set
+  `PROJECT_TANGO_PERSIST=0` to run stateless (nothing is written, nothing is
+  lost, it just does not survive a restart), or `PROJECT_TANGO_STORE=json` to
+  keep the JSON backend and accept that it cannot notice another process
+  replacing the catalog underneath it. Both start normally, and both are stated
+  in the README's new *Runtime floor* section rather than left in the source.
+
+### Added
+
+- **A release gate that runs before a release, not after one.** Two releases in
+  a row went out over a red CI run, and the changelog/tag lineage checks that
+  would have caught the cause can only run once the tag exists — so they run
+  minutes after the release is public. `scripts/release-check.mjs` moves every
+  one of those conditions to the moment you can still do something about them:
+  the version agrees across `package.json`, `package-lock.json` and
+  `SERVER_VERSION`; the changelog has a dated heading and a link for it; the tag
+  is annotated, sits on `main`'s lineage, is dated the day the heading claims,
+  and is an ancestor of `HEAD`. It is wired as `npm run release:check` and runs
+  in CI on tag pushes, so the mistake is caught on a private commit as often as
+  on a public tag.
+- **A Windows CI leg.** Every gate in this project had only ever run on Linux,
+  on a machine whose line endings, path separators and shell differ from the
+  platform a surprising share of agent tooling is actually installed on. CI now
+  builds and tests on `ubuntu-latest` and `windows-latest` in the same matrix,
+  with `fail-fast: false` so a Windows failure is visible rather than inferred.
+- **The published tarball is installed and booted before it is believed.** The
+  package smoke test used to run against the working tree, so it could pass on a
+  build whose tarball was missing the entry point. CI now packs, installs into a
+  clean directory, boots the real binary over stdio and completes a real
+  `place_order` against it — the same check, run against the artefact users
+  download.
+- **The start-up refusal is tested end to end.** `src/bootstrap.test.ts` spawns
+  the real `index.ts` as a child process and asserts on its exit code and
+  stdout: a normal runtime answers `initialize`, an old one exits 1 with an
+  explanation and an empty stdout, and — the assertion that matters — a refused
+  start leaves no data directory behind, so the failure cannot be mistaken for a
+  corrupt install.
+
+### Fixed
+
+- **The concurrency soak could not fail.** 3.1.2's freshness test asserted no
+  read trailed a committed write by more than one commit. Measured, that bound
+  was never tested: a read cost about a quarter of a write, so the reader was
+  almost always reading between commits and `worstLag` was structurally zero. A
+  reader that refreshed only one read in sixty would have passed. The reader now
+  pauses briefly between reads, so roughly three quarters of the gaps it
+  observes contain two or more commits, and a new assertion fails the suite if a
+  run never once put the reader behind — the test can no longer pass vacuously.
+  Lazy-refresh and zero-delay variants were confirmed to fail it.
+- **The Windows leg's own smoke script is verified locally, not just in CI.** It
+  was extracted from the workflow YAML and run against a real local pack before
+  being trusted, including the case where the binary is missing and the script
+  must exit non-zero rather than pass quietly.
+
 ## [3.1.2] — 2026-10-04
 
 Tightens the seam that 3.1.1 left loose, and proves it holds under load.
@@ -320,6 +393,7 @@ also has seven features `v2.0.0` lacks: `find_orders`, `reset_demo_state`, the
 category scoping on three tools, the sales trend series, durable restart-safe
 persistence, the injectable `createServer` seam, and the lint/coverage/CI gates.
 
+[3.2.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.2.0
 [3.1.2]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.2
 [3.1.1]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.1
 [3.1.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.0

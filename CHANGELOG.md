@@ -73,10 +73,28 @@ the final state through a new process for exactly that reason.
 > **Resolved after this tag.** See [Unreleased](#unreleased) below: reads now
 > refresh against `PRAGMA data_version`.
 
+## Why the `v2.0.0` trie was ported as ranking
+
+`v2.0.0` replaced substring search with prefix-only matching and called it an
+improvement. Measured against this catalog, it is not: `"tch"` matches **7**
+products by substring and **5** by token prefix, and `"a"` matches 13 against 6.
+Substring matching reaches inside `tech` and `stitch`; a prefix only matches from
+the start of a token. Shipping it as written would have cut recall while
+looking like a speed-up.
+
+So the index here ranks instead of filtering. `filterProducts` still decides the
+candidate set, and the trie only orders it — a product whose own token is the
+query outranks one that merely contains it, on three tiers (the query is a whole
+name/SKU/category/tag, is one word of one, or starts one). The tier is what
+separates `Cable` from `Cable Management Tray`: both carry a `cable` token, and
+a token-level comparison alone lets the longer name win on accumulated prefix
+matches.
+
 ## Unreleased
 
-Work on `main` after the `v3.1.0` tag. Two fixes, both found while trying to
-make a server notice that another process had written.
+Work on `main` after the `v3.1.0` tag. Two data-loss defects and one write
+failure found while trying to make a server notice that another process had
+written, plus the workflow that gives every release a verified artifact.
 
 ### Fixed
 
@@ -131,23 +149,6 @@ make a server notice that another process had written.
   order was placed when the transaction behind it was rolled back — the exact
   "silent partial write" this project promises cannot happen. Constraint failures
   are now rethrown; environmental ones still degrade with a warning.
-
-## Why the `v2.0.0` trie was ported as ranking
-
-`v2.0.0` replaced substring search with prefix-only matching and called it an
-improvement. Measured against this catalog, it is not: `"tch"` matches **7**
-products by substring and **5** by token prefix, and `"a"` matches 13 against 6.
-Substring matching reaches inside `tech` and `stitch`; a prefix only matches from
-the start of a token. Shipping it as written would have cut recall while
-looking like a speed-up.
-
-So the index here ranks instead of filtering. `filterProducts` still decides the
-candidate set, and the trie only orders it — a product whose own token is the
-query outranks one that merely contains it, on three tiers (the query is a whole
-name/SKU/category/tag, is one word of one, or starts one). The tier is what
-separates `Cable` from `Cable Management Tray`: both carry a `cable` token, and
-a token-level comparison alone lets the longer name win on accumulated prefix
-matches.
 
 ## [3.0.1] — 2026-10-04
 

@@ -11,6 +11,67 @@ only published releases, so `minor`/`patch` numbers here mean published tags.
 > as the durable store, respectively — so the feature list below is a record of
 > what `v2.0.0` holds, not of what `main` lacks.
 
+## [3.1.1] — 2026-10-04
+
+Bug fixes and release tooling. No tool names, parameters or response fields
+changed. Two data-loss defects and one write failure, all found while trying to
+make a server notice that another process had written, plus the workflow that
+gives every release a verified artifact.
+
+### Fixed
+
+- **A server listed thirteen products and then refused to sell one of them.**
+  Saved state can legitimately hold fewer products than the seed catalog — a
+  `state.json` written before a product was added, or one whose rows were pruned
+  — and the startup reconcile put the missing ones back in memory. A transaction
+  then re-read the store under its write lock and adopted that smaller row set
+  *verbatim*, so the catalog collapsed to whatever the file happened to contain,
+  and `simulate_order_placement` answered `no product found with id "prod_001"`
+  for a product `list_all_products` had just returned. The commit that followed
+  persisted the loss, so the erosion survived every restart. Reconciliation now
+  happens wherever stored state is adopted, and because a commit writes what is
+  in memory, the stored catalog is repaired rather than eroded.
+- **A running server kept serving a catalog another process had replaced.**
+  Reads came from the process's own copy, which only caught up when that process
+  wrote something itself — so an agent could place an order in one window and be
+  told stale inventory in the next. Reads now compare a cheap change token first
+  (`PRAGMA data_version`, `stat` on the JSON backend) and reload only when
+  another process committed. The check is skipped during a transaction, where a
+  reload would discard state that has not committed yet.
+
+### Added
+
+- **Releases carry a verified installable tarball.** A new workflow builds it,
+  installs it into a clean directory, drives the binary that install ships, and
+  only then attaches it to the release — on `release: published`, so it happens
+  without being asked. Two things this fixes: `v3.1.0` shipped source only, and
+  an artifact attached from a contributor's machine turned out to be corrupt
+  there (GitHub's asset endpoint stored the multipart envelope along with the
+  file on every framing tried, so a "successful" upload produced an unusable
+  download). Attaching from a runner also means the published file is the one
+  that was executed, not one built alongside the release and never run.
+- **`StateStore.changeToken?()`** — an optional cheap token that moves when
+  another process committed. Optional on purpose: a backend that cannot detect
+  another writer keeps the previous behaviour instead of re-reading blindly.
+- **Order ids carry their process id.** `nextOrderId` proved unique only within
+  one process: its sequence is module state, so two servers sharing a data
+  directory minted the *same* id for orders placed in the same millisecond. With
+  `orders.id` a primary key, the stored list then held that id twice and the
+  second write was rejected outright — one server's order could not be placed at
+  all. The pid closes the gap with no randomness: two live processes cannot share
+  one, and a recycled pid only collides with an id from a different millisecond.
+
+### Fixed
+
+- **A rejected save reported itself as a successful one.** `save()` swallowed
+  every write failure and logged it, which is right for the environment (a
+  read-only disk, a closed handle) and wrong for the data: `SQLITE_CONSTRAINT`
+  means the rows are not storable, which is a defect in what was built rather
+  than where it is stored. That combination is how a caller comes to believe an
+  order was placed when the transaction behind it was rolled back — the exact
+  "silent partial write" this project promises cannot happen. Constraint failures
+  are now rethrown; environmental ones still degrade with a warning.
+
 ## [3.1.0] — 2026-10-04
 
 State is now durable across processes, and the `v2.0.0` lineage's two useful
@@ -70,8 +131,9 @@ transaction lock — and a freshly started process is always current. Two server
 driven from one client are the case this shows up in; the lifecycle suite reads
 the final state through a new process for exactly that reason.
 
-> **Resolved after this tag.** See [Unreleased](#unreleased) below: reads now
-> refresh against `PRAGMA data_version`.
+> **Fixed in [3.1.1](#311--2026-10-04).** Reads now refresh against
+> `PRAGMA data_version`, and the catalog a partial state file erodes is repaired
+> rather than committed.
 
 ## Why the `v2.0.0` trie was ported as ranking
 
@@ -89,66 +151,6 @@ name/SKU/category/tag, is one word of one, or starts one). The tier is what
 separates `Cable` from `Cable Management Tray`: both carry a `cable` token, and
 a token-level comparison alone lets the longer name win on accumulated prefix
 matches.
-
-## Unreleased
-
-Work on `main` after the `v3.1.0` tag. Two data-loss defects and one write
-failure found while trying to make a server notice that another process had
-written, plus the workflow that gives every release a verified artifact.
-
-### Fixed
-
-- **A server listed thirteen products and then refused to sell one of them.**
-  Saved state can legitimately hold fewer products than the seed catalog — a
-  `state.json` written before a product was added, or one whose rows were pruned
-  — and the startup reconcile put the missing ones back in memory. A transaction
-  then re-read the store under its write lock and adopted that smaller row set
-  *verbatim*, so the catalog collapsed to whatever the file happened to contain,
-  and `simulate_order_placement` answered `no product found with id "prod_001"`
-  for a product `list_all_products` had just returned. The commit that followed
-  persisted the loss, so the erosion survived every restart. Reconciliation now
-  happens wherever stored state is adopted, and because a commit writes what is
-  in memory, the stored catalog is repaired rather than eroded.
-- **A running server kept serving a catalog another process had replaced.**
-  Reads came from the process's own copy, which only caught up when that process
-  wrote something itself — so an agent could place an order in one window and be
-  told stale inventory in the next. Reads now compare a cheap change token first
-  (`PRAGMA data_version`, `stat` on the JSON backend) and reload only when
-  another process committed. The check is skipped during a transaction, where a
-  reload would discard state that has not committed yet.
-
-### Added
-
-- **Releases carry a verified installable tarball.** A new workflow builds it,
-  installs it into a clean directory, drives the binary that install ships, and
-  only then attaches it to the release — on `release: published`, so it happens
-  without being asked. Two things this fixes: `v3.1.0` shipped source only, and
-  an artifact attached from a contributor's machine turned out to be corrupt
-  there (GitHub's asset endpoint stored the multipart envelope along with the
-  file on every framing tried, so a "successful" upload produced an unusable
-  download). Attaching from a runner also means the published file is the one
-  that was executed, not one built alongside the release and never run.
-- **`StateStore.changeToken?()`** — an optional cheap token that moves when
-  another process committed. Optional on purpose: a backend that cannot detect
-  another writer keeps the previous behaviour instead of re-reading blindly.
-- **Order ids carry their process id.** `nextOrderId` proved unique only within
-  one process: its sequence is module state, so two servers sharing a data
-  directory minted the *same* id for orders placed in the same millisecond. With
-  `orders.id` a primary key, the stored list then held that id twice and the
-  second write was rejected outright — one server's order could not be placed at
-  all. The pid closes the gap with no randomness: two live processes cannot share
-  one, and a recycled pid only collides with an id from a different millisecond.
-
-### Fixed
-
-- **A rejected save reported itself as a successful one.** `save()` swallowed
-  every write failure and logged it, which is right for the environment (a
-  read-only disk, a closed handle) and wrong for the data: `SQLITE_CONSTRAINT`
-  means the rows are not storable, which is a defect in what was built rather
-  than where it is stored. That combination is how a caller comes to believe an
-  order was placed when the transaction behind it was rolled back — the exact
-  "silent partial write" this project promises cannot happen. Constraint failures
-  are now rethrown; environmental ones still degrade with a warning.
 
 ## [3.0.1] — 2026-10-04
 
@@ -254,6 +256,7 @@ also has seven features `v2.0.0` lacks: `find_orders`, `reset_demo_state`, the
 category scoping on three tools, the sales trend series, durable restart-safe
 persistence, the injectable `createServer` seam, and the lint/coverage/CI gates.
 
+[3.1.1]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.1
 [3.1.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.0
 [3.0.1]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.0.1
 [3.0.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.0.0

@@ -6,8 +6,86 @@ only published releases, so `minor`/`patch` numbers here mean published tags.
 
 > **Note on the `v2.0.0` tag.** The `v2.0.0` tag in this repository is **not an
 > ancestor of `main`**. It sits on a divergent lineage that branched from
-> `v1.0.0` and was never merged. See [Divergent lineage](#divergent-lineage)
-> below — it contains features `main` does not have.
+> `v1.0.0` and was never merged, and it is still unmerged. Its trie search and
+> its SQLite store have since been *ported* onto `main` — as a ranking layer and
+> as the durable store, respectively — so the feature list below is a record of
+> what `v2.0.0` holds, not of what `main` lacks.
+
+## [3.1.0] — 2026-10-04
+
+State is now durable across processes, and the `v2.0.0` lineage's two useful
+ideas are in `main`. Tool names, parameters and response fields are unchanged
+from 3.0.1, except that `list_all_products` now returns its matches ranked.
+
+### Added
+
+- **A SQLite durable store** (`src/sqliteStore.ts`). State moved from a
+  `state.json` snapshot to `state.db`, using Node's built-in `node:sqlite` — no
+  new dependency, nothing to install, nothing to host. An existing `state.json`
+  is imported on first run, validated record by record with exactly the rules
+  the JSON store used, and kept as `state.json.migrated`.
+- **Cross-process write transactions.** `StateStore` gained an optional `update`,
+  and the SQLite store implements it as `BEGIN IMMEDIATE` — the write lock is
+  taken *before* the state is read, so a second server validates against what
+  the first one committed rather than against a snapshot it has already moved
+  past. `MockDataProvider.transact()` uses it, so order placement's whole
+  read-validate-write is exclusive. This is the change that makes concurrent
+  writes safe: ten server attempts at 5 units against a stock of 42 fill
+  exactly eight orders and refuse the other two with a reason, where before the
+  last writer's snapshot simply overwrote the others.
+- **Search ranking** (`src/productIndex.ts`), ported from the `v2.0.0` lineage's
+  `src/trie.ts` — but as a *ranking layer*, not the filter it was there. See
+  [the note below](#why-the-v200-trie-was-ported-as-ranking).
+- **`PROJECT_TANGO_STORE=json`** to force the previous whole-snapshot backend,
+  for a runtime without `node:sqlite` (Node < 22.5). It keeps publishing one
+  process's complete snapshot and is still last-writer-wins across processes;
+  the README says so where it documents that flag.
+
+### Fixed
+
+- **Two servers starting together could split one catalog across two files.**
+  `PRAGMA journal_mode = WAL` returns `SQLITE_BUSY` *immediately*, ignoring
+  `busy_timeout`, so opening the store raced: the loser gave up, fell back to
+  the JSON backend, and two processes then wrote `state.db` and `state.json` as
+  separate catalogs that each believed they owned the stock. The store now
+  retries the open with backoff and waits out a lock another process holds
+  instead of routing around it.
+- **Falling back to a different on-disk store is worse than losing durability.**
+  Two files disagreeing about inventory is not recoverable; losing state across
+  a restart is. A store that cannot be opened now degrades to memory with a
+  warning on stderr, never to a second file.
+- **A test run could create the real `~/.project-tango` catalog.** The store is
+  resolved — and therefore created — when `mockData.ts` is imported, and
+  `src/storage.test.ts` asked for the default directory to check its
+  description. The runner now pins a throwaway data directory for every test
+  process (`src/testGlobalSetup.ts`), and a suite-hygiene test fails if that
+  wiring is ever dropped.
+
+### Known limitation
+
+Reads are served from a running process's own in-memory catalog, so a
+long-lived server can trail another process's last commit until it writes
+something itself. Writes never read a stale snapshot — they re-read under the
+transaction lock — and a freshly started process is always current. Two servers
+driven from one client are the case this shows up in; the lifecycle suite reads
+the final state through a new process for exactly that reason.
+
+## Why the `v2.0.0` trie was ported as ranking
+
+`v2.0.0` replaced substring search with prefix-only matching and called it an
+improvement. Measured against this catalog, it is not: `"tch"` matches **7**
+products by substring and **5** by token prefix, and `"a"` matches 13 against 6.
+Substring matching reaches inside `tech` and `stitch`; a prefix only matches from
+the start of a token. Shipping it as written would have cut recall while
+looking like a speed-up.
+
+So the index here ranks instead of filtering. `filterProducts` still decides the
+candidate set, and the trie only orders it — a product whose own token is the
+query outranks one that merely contains it, on three tiers (the query is a whole
+name/SKU/category/tag, is one word of one, or starts one). The tier is what
+separates `Cable` from `Cable Management Tray`: both carry a `cable` token, and
+a token-level comparison alone lets the longer name win on accumulated prefix
+matches.
 
 ## [3.0.1] — 2026-10-04
 
@@ -92,23 +170,28 @@ into `main`**. It is a parallel implementation, not a step toward 3.x.
 
 It contains work `main` does not have:
 
-- **SQLite persistence** (`.tango/store.db`) with a WAL, via `src/database.ts`
+- **SQLite persistence** (`.tango/store.db`) with a WAL, via `src/database.ts` —
+  *ported in 3.1.0, with different behaviour*: the port adds the cross-process
+  write transaction that `v2.0.0` did not have, and reads the store through
+  `BEGIN IMMEDIATE`.
 - **Prefix-trie product search** (`src/trie.ts`) exposed as a `search_products`
-  tool — `main` instead has a substring search on `list_all_products`
-- **A reactive event broker and saga rollback** (`src/engine.ts`)
+  tool — *ported in 3.1.0 as a ranking layer*, keeping `list_all_products`'s
+  substring recall rather than replacing it with prefix-only matching. The
+  separate `search_products` tool was not ported.
+- **A reactive event broker and saga rollback** (`src/engine.ts`) — still absent
+  from `main`; `MockDataProvider.transact()` covers the rollback, but nothing
+  publishes events.
 - A 422-line integration suite (`test/integration.test.ts`) and a `.prettierrc`
   — with no ESLint, coverage gate or CI
 
-`main` does **not** contain any of this. Conversely `main` has seven features
-`v2.0.0` lacks: `find_orders`, `reset_demo_state`, the category scoping on three
-tools, the sales trend series, durable restart-safe persistence, the injectable
-`createServer` seam, and the lint/coverage/CI gates. Neither lineage descends from
-the other past `v1.0.0`, so neither is a strict successor.
+The tag is still off `main`'s lineage and this section is a record, not a merge
+plan: the two implementations share only `types.ts` and the tool names they have
+in common, so anything carried over was rewritten rather than merged. `main`
+also has seven features `v2.0.0` lacks: `find_orders`, `reset_demo_state`, the
+category scoping on three tools, the sales trend series, durable restart-safe
+persistence, the injectable `createServer` seam, and the lint/coverage/CI gates.
 
-If you want `v2.0.0`'s trie search or SQLite store in the current code, that is
-porting work, not a merge — the two implementations share only `types.ts` and the
-tool names they have in common.
-
+[3.1.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.0
 [3.0.1]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.0.1
 [3.0.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.0.0
 [1.0.0]: https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v1.0.0

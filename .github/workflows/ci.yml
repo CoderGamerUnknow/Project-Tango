@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck (source + suites)
+        run: npm run typecheck
+
+      - name: Lint (type-aware)
+        run: npm run lint
+
+      # Runs the whole suite under coverage with minimum thresholds — a test
+      # run that regresses coverage fails here, not silently.
+      - name: Test with coverage floor
+        run: |
+          set -o pipefail
+          npm run test:coverage 2>&1 | tee test-output.log
+
+      # The README states its own test count; this check keeps that claim
+      # honest by comparing it against the run above.
+      - name: README test count must match the suite
+        run: |
+          ACTUAL=$(grep -oE 'tests [0-9]+' test-output.log | head -1 | grep -oE '[0-9]+$')
+          CLAIMED=$(grep -oE '^[0-9]+ tests' README.md | head -1 | grep -oE '^[0-9]+')
+          echo "README claims ${CLAIMED} tests; the suite ran ${ACTUAL}"
+          if [ -z "$ACTUAL" ] || [ -z "$CLAIMED" ] || [ "$ACTUAL" != "$CLAIMED" ]; then
+            echo "README test count is stale — update it to ${ACTUAL}."
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build

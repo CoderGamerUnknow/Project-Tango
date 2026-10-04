@@ -1,4 +1,4 @@
-import type { DataProvider, Order, Product } from "./types.js";
+import type { Product } from "./types.js";
 
 /**
  * A rich, realistic starter catalog spanning tech, apparel, and home goods.
@@ -7,7 +7,7 @@ import type { DataProvider, Order, Product } from "./types.js";
  * (inventoryCount < 3) so that `get_low_stock_alerts` and
  * `smart_restock_predictor` have real signal to work with out of the box.
  */
-const products: Product[] = [
+export const seedProducts: Product[] = [
   {
     id: "prod_001",
     name: "AeroBuds Pro Wireless Earbuds",
@@ -139,124 +139,3 @@ const products: Product[] = [
     description: "Whisper-quiet ultrasonic diffuser with 7-color ambient LED ring.",
   },
 ];
-
-/**
- * Five recent orders referencing the catalog above. Quantities here drive
- * `analyze_sales_metrics` and the demand-velocity math in
- * `smart_restock_predictor`, so the low-stock items above have real,
- * traceable sales history rather than arbitrary numbers.
- */
-const orders: Order[] = [
-  {
-    id: "ord_1001",
-    customerName: "Maya Chen",
-    items: [
-      { productId: "prod_002", quantity: 1 },
-      { productId: "prod_001", quantity: 1 },
-    ],
-    totalAmount: 378.99,
-    status: "delivered",
-    date: "2026-06-14",
-  },
-  {
-    id: "ord_1002",
-    customerName: "Daniel Osei",
-    items: [
-      { productId: "prod_006", quantity: 2 },
-      { productId: "prod_009", quantity: 1 },
-    ],
-    totalAmount: 235.99,
-    status: "delivered",
-    date: "2026-06-20",
-  },
-  {
-    id: "ord_1003",
-    customerName: "Priya Ramanathan",
-    items: [
-      { productId: "prod_004", quantity: 1 },
-      { productId: "prod_005", quantity: 1 },
-    ],
-    totalAmount: 228.99,
-    status: "shipped",
-    date: "2026-06-28",
-  },
-  {
-    id: "ord_1004",
-    customerName: "Lucas Ferreira",
-    items: [
-      { productId: "prod_011", quantity: 1 },
-      { productId: "prod_010", quantity: 1 },
-      { productId: "prod_013", quantity: 1 },
-    ],
-    totalAmount: 238.5,
-    status: "pending",
-    date: "2026-07-02",
-  },
-  {
-    id: "ord_1005",
-    customerName: "Sofia Kowalski",
-    items: [
-      { productId: "prod_008", quantity: 2 },
-      { productId: "prod_002", quantity: 1 },
-    ],
-    totalAmount: 474.0,
-    status: "pending",
-    date: "2026-07-06",
-  },
-];
-
-/**
- * In-memory, mutable implementation of `DataProvider`.
- *
- * This is the "instant, zero-configuration" half of the mock-to-real
- * pipeline: every tool in src/index.ts is written against the `DataProvider`
- * interface, so replacing `mockDataProvider` with a `ShopifyDataProvider` /
- * `StripeDataProvider` that talks to real APIs requires no changes to tool
- * logic — only a new class implementing the same four methods.
- */
-class MockDataProvider implements DataProvider {
-  private products: Product[];
-  private orders: Order[];
-
-  constructor(seedProducts: Product[], seedOrders: Order[]) {
-    // Deep-copy the seed data so mutations from simulate_order_placement
-    // never leak back into the module-level constants above.
-    this.products = seedProducts.map((p) => ({ ...p, tags: [...p.tags] }));
-    this.orders = seedOrders.map((o) => ({ ...o, items: o.items.map((i) => ({ ...i })) }));
-  }
-
-  async getProducts(): Promise<Product[]> {
-    return this.products;
-  }
-
-  async getOrders(): Promise<Order[]> {
-    return this.orders;
-  }
-
-  async getProductById(id: string): Promise<Product | undefined> {
-    return this.products.find((p) => p.id === id);
-  }
-
-  async getProductBySku(sku: string): Promise<Product | undefined> {
-    return this.products.find((p) => p.sku.toLowerCase() === sku.toLowerCase());
-  }
-
-  async updateProductInventory(id: string, newCount: number): Promise<Product | undefined> {
-    const product = this.products.find((p) => p.id === id);
-    if (!product) return undefined;
-    product.inventoryCount = newCount;
-    return product;
-  }
-
-  async addOrder(order: Order): Promise<Order> {
-    this.orders.push(order);
-    return order;
-  }
-}
-
-/**
- * Singleton mock provider used by default in src/index.ts. Swap this import
- * for a real provider implementation when you're ready to go live — see the
- * `DataProvider` interface in src/types.ts.
- */
-export const mockDataProvider: DataProvider = new MockDataProvider(products, orders);

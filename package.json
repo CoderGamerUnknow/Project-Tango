@@ -13,7 +13,14 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "lint": "eslint .",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-lines=98 --test-coverage-branches=94 --test-coverage-functions=96 \"src/**/*.test.ts\"",
+    "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc",
+    "pretest": "npm run typecheck",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "verify": "npm run typecheck && npm run lint && npm run test:coverage && npm run build",
     "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts"
   },
   "engines": {
@@ -34,7 +41,9 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "eslint": "^10.12.0",
     "tsx": "^4.23.0",
-    "typescript": "^7.0.2"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.0"
   }
 }

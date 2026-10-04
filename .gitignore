@@ -141,3 +141,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Project-local state (tests pin a temp dir; this is belt and braces)
+state.json
+state.json.tmp.*

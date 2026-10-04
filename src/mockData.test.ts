@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { MockDataProvider } from "./mockData.js";
 import { seedOrders } from "./orderGenerator.js";
 import { seedProducts } from "./seedCatalog.js";
-import { createMemoryStore, type PersistedState, type StateStore } from "./storage.js";
+import { createMemoryStore, stableToken, type PersistedState, type StateStore } from "./storage.js";
 import type { Order } from "./types.js";
 
 /**
@@ -128,6 +128,7 @@ describe("durability", () => {
         store.saves += 1;
         inner.save(state);
       },
+      changeToken: inner.changeToken,
       saves: 0,
     };
     return store;
@@ -375,22 +376,28 @@ describe("cross-process freshness", () => {
     );
   });
 
-  it("keeps serving its own copy when the store cannot report a change token", async () => {
-    // A deliberately token-less store: `changeToken` is optional on the
-    // contract, and a backend that cannot detect another writer must keep the
-    // behaviour this project always had rather than re-reading on every call.
+  it("keeps serving its own copy when the store declares it cannot detect other writers", async () => {
+    // The token used to be optional, so a backend could omit it and silently get
+    // the old stale-read behaviour. It is required now, and a backend that really
+    // cannot tell says so with `stableToken` — which is what this asserts: the
+    // provider must respect a stable token rather than reload on every call.
     let state: PersistedState | undefined;
-    const tokenless: StateStore = {
-      description: "tokenless test store",
+    const singleWriter: StateStore = {
+      description: "single-writer test store",
       load: () => (state === undefined ? undefined : structuredClone(state)),
       save: (next) => {
         state = structuredClone(next);
       },
+      changeToken: stableToken("single-writer-test"),
     };
-    assert.equal(tokenless.changeToken, undefined, "this store must not report a token");
+    assert.match(
+      singleWriter.changeToken(),
+      /single-writer-test/,
+      "the token must say why it never moves, so the limitation is visible"
+    );
 
-    const provider = new MockDataProvider(seedProducts, seedOrders, tokenless);
-    tokenless.save({
+    const provider = new MockDataProvider(seedProducts, seedOrders, singleWriter);
+    singleWriter.save({
       version: 1,
       products: seedProducts.map((p) => ({ ...p, inventoryCount: 1 })),
       orders: seedOrders,
@@ -399,7 +406,7 @@ describe("cross-process freshness", () => {
     assert.equal(
       (await provider.getProductBySku("TCH-AB-001"))!.inventoryCount,
       42,
-      "without a token the provider must not reload, and so keeps serving its own copy"
+      "a stable token must mean no reload, and so the provider keeps serving its own copy"
     );
   });
 });

@@ -9,7 +9,9 @@ import {
   createFileStore,
   createMemoryStore,
   resolveStateStore,
+  stableToken,
   type PersistedState,
+  type StateStore,
 } from "./storage.js";
 import type { Order, Product } from "./types.js";
 
@@ -330,6 +332,76 @@ describe("createFileStore", () => {
         2
       );
     });
+  });
+});
+
+describe('the change token contract', () => {
+  // Every backend the project ships must be able to say when another writer
+  // committed. The token was optional once, which let a backend omit it and
+  // silently keep serving a stale catalog; this is what stops that going
+  // unnoticed the next time one is added.
+  it('is implemented by every store resolveStateStore can return', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'project-tango-token-'));
+    const opened: StateStore[] = [];
+    try {
+      const stores = {
+        memory: await resolveStateStore({ PROJECT_TANGO_PERSIST: '0' }),
+        file: await resolveStateStore({ PROJECT_TANGO_DATA_DIR: dir, PROJECT_TANGO_STORE: 'json' }),
+        sqlite: await resolveStateStore({ PROJECT_TANGO_DATA_DIR: dir }),
+      };
+      opened.push(...Object.values(stores));
+
+      for (const [name, store] of Object.entries(stores)) {
+        assert.equal(typeof store.changeToken, 'function', `the ${name} store must report a change token`);
+        assert.equal(typeof store.changeToken(), 'string');
+      }
+    } finally {
+      // Closed before the directory is removed: on Windows a live handle makes
+      // `rmSync` fail with EPERM, which is a failure of the cleanup, not the
+      // thing being asserted.
+      for (const store of opened) store.close?.();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  });
+
+  it('moves on the file store when another writer rewrites the file', () => {
+    // The JSON backend cannot lock, but it can still notice a rival writing the
+    // same directory — which is the difference between a stale read and a
+    // reload, and the reason the token is required rather than optional.
+    //
+    // The own-write case deliberately saves *different* content. The token is
+    // `size:mtime`, so rewriting byte-identical state can legitimately leave it
+    // unchanged on a filesystem with coarse mtime granularity — that would be
+    // testing the OS, not this store.
+    const dir = mkdtempSync(join(tmpdir(), 'project-tango-file-token-'));
+    const mine = createFileStore(dir);
+    const theirs = createFileStore(dir);
+    try {
+      assert.equal(mine.changeToken(), 'absent', 'no file yet');
+
+      theirs.save(makeState());
+      const afterRival = mine.changeToken();
+      assert.notEqual(afterRival, 'absent', 'a rival write must move the token');
+      assert.equal(mine.changeToken(), afterRival, 'and it must settle once it has moved');
+
+      mine.save(makeState({ orders: [] }));
+      assert.notEqual(
+        mine.changeToken(),
+        afterRival,
+        'the file store derives its token from the file, so our own write moves it too — ' +
+          'documented on the contract, and harmless: the provider reloads once rather than serving stale data'
+      );
+    } finally {
+      mine.close?.();
+      theirs.close?.();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  });
+
+  it('describes a backend that cannot detect other writers instead of omitting it', () => {
+    const token = stableToken('read-only-filesystem');
+    assert.equal(token(), token());
+    assert.match(token(), /read-only-filesystem/, 'the reason must be in the token, not just in a comment');
   });
 });
 

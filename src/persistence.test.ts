@@ -358,6 +358,144 @@ describe("persistence", () => {
     });
   });
 
+  it("stays current and consistent under a sustained read loop", async () => {
+    // The single-rival test proves the mechanism once. This is the shape it
+    // actually runs in: a server answering a stream of reads for a whole
+    // conversation while another one writes repeatedly underneath it. What
+    // matters is not the first stale read — it is a reader whose position drifts
+    // further and further behind, that never converges, or that is handed a
+    // catalog mid-write and takes a tool down with it. None of that shows up in a
+    // single interleaving; it needs the two processes running long enough for the
+    // drift to accumulate.
+    await withSession(async (boot) => {
+      const [reader, writer] = await Promise.all([boot(), boot()]);
+
+      // Demand is spread across the four best-stocked products (42/60/27/23) so a
+      // long soak cannot simply run one line to zero and then fail for a reason
+      // that has nothing to do with freshness.
+      const POOL = ["prod_001", "prod_009", "prod_012", "prod_005"];
+      const QTY = 2;
+      const WRITES = 40;
+      const TOTAL_REMOVED = WRITES * QTY;
+      // How far behind the last commit a read may be, in commits. Measured
+      // across this soak the healthy reader never lags at all; one commit of
+      // slack is the one race that cannot be closed — a write landing between
+      // the token check and the reload is legitimately not in the snapshot the
+      // read is serving. Two means the token check has stopped working and the
+      // reader is coasting on an old catalog.
+      const MAX_LAG_COMMITS = 1;
+      // How many reads the reader may need, after the writer goes quiet, before
+      // it must be current.
+      const CONVERGENCE_BOUND = 3;
+      // Enough headroom that the reader is never what ends the run.
+      const READ_CAP = WRITES * 40;
+
+      // What the writer has committed, per product. The reader's job is to match
+      // it; this map is the truth it is measured against.
+      const committed = new Map<string, number>();
+      for (const id of POOL) committed.set(id, (await readProduct(reader, id)).inventoryCount);
+
+      let removed = 0;
+      const stockOf = (listed: any, id: string) =>
+        listed.products.find((p: { id: string }) => p.id === id).inventoryCount;
+
+      const lastSeen = new Map<string, number>();
+      const distinct = new Map<string, Set<number>>();
+      for (const id of POOL) distinct.set(id, new Set<number>());
+      let readCount = 0;
+      let worstLag = 0;
+      let failedRead: Error | undefined;
+
+      // Read continuously while the writer commits underneath. Nothing waits for
+      // the other side, which is the whole point.
+      const reading = (async () => {
+        while (removed < TOTAL_REMOVED && readCount < READ_CAP) {
+          try {
+            const listed = parse(await reader.callTool({ name: "list_all_products", arguments: {} }));
+            assert.equal(listed.count, 13, "a read mid-write must still return a whole catalog");
+            for (const id of POOL) {
+              const stock = stockOf(listed, id);
+              assert.ok(stock >= 0, `stock must never be observed negative (${id})`);
+              // Monotonic per product: committed stock only ever goes down, so a
+              // value above the last one would mean this read served something
+              // older than a read that had already seen a later commit.
+              const previous = lastSeen.get(id);
+              if (previous !== undefined) {
+                assert.ok(
+                  stock <= previous,
+                  `${id} went backwards across reads: ${previous} then ${stock}`
+                );
+              }
+              lastSeen.set(id, stock);
+              distinct.get(id)!.add(stock);
+              worstLag = Math.max(worstLag, (committed.get(id)! - stock) / QTY);
+            }
+            readCount += 1;
+          } catch (error) {
+            failedRead = error instanceof Error ? error : new Error(String(error));
+            return;
+          }
+        }
+      })();
+
+      const writing = (async () => {
+        for (let i = 0; i < WRITES; i++) {
+          const id = POOL[i % POOL.length]!;
+          const placed = await writer.callTool({
+            name: "simulate_order_placement",
+            arguments: { customer_name: `Stream ${i}`, items: [{ product_id: id, quantity: QTY }] },
+          });
+          assert.equal(placed.isError, undefined, `write ${i} against ${id} failed`);
+          committed.set(id, committed.get(id)! - QTY);
+          removed += QTY;
+        }
+      })();
+
+      await writing;
+      await reading;
+
+      if (failedRead) throw failedRead;
+      for (const [id, want] of committed) {
+        assert.equal(
+          (await readProduct(reader, id)).inventoryCount,
+          want,
+          `the reader must end on the committed value for ${id}, not somewhere behind it`
+        );
+      }
+      // It followed the stream instead of jumping once at the end. A reader that
+      // only refreshed on its own writes would see each product's starting value
+      // and its final one and nothing in between — precisely the defect pinned
+      // here — so every product must have been seen moving.
+      for (const [id, seen] of distinct) {
+        assert.ok(
+          seen.size >= 3,
+          `the reader saw ${seen.size} distinct stock levels for ${id} across the soak — it is not following the stream`
+        );
+      }
+      assert.ok(
+        worstLag <= MAX_LAG_COMMITS,
+        `a read was ${worstLag} commits behind the writer; the bound is ${MAX_LAG_COMMITS}`
+      );
+
+      // The property that actually matters, stated as a bound: once the writer
+      // goes quiet, how many reads does the reader need to become current?
+      // "Eventually" is not a guarantee anyone can build on; "within a few reads
+      // of the last commit" is.
+      let readsToConverge = 0;
+      let stale = POOL.filter((id) => (lastSeen.get(id) ?? NaN) !== committed.get(id));
+      while (stale.length > 0 && readsToConverge < CONVERGENCE_BOUND) {
+        readsToConverge += 1;
+        const listed = parse(await reader.callTool({ name: "list_all_products", arguments: {} }));
+        stale = POOL.filter((id) => stockOf(listed, id) !== committed.get(id));
+      }
+      assert.equal(
+        stale.length,
+        0,
+        `the reader was still behind on ${stale.join(", ")} after ${readsToConverge} reads past the last commit`
+      );
+    });
+  });
+
   it("starts from the seed dataset when the state file is corrupt, without crashing", async () => {
     await withSession(async (boot) => {
       const c = await boot();

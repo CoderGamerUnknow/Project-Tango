@@ -104,7 +104,7 @@ npm run test:coverage # the suite under coverage, with minimum thresholds
 npm run verify        # typecheck + lint + coverage + build, in one shot
 ```
 
-266 tests, no test framework to install — Node's built-in test runner drives
+271 tests, no test framework to install — Node's built-in test runner drives
 `tsx`. The
 suites are typechecked before they run (`pretest` → `npm run typecheck`), which
 covers them as well as the source; previously only the source was checked, so a
@@ -202,6 +202,17 @@ first run — validated record by record, exactly as the JSON store did, so a
 malformed record is dropped rather than becoming a runtime failure — and the old
 file is kept as `state.json.migrated`.
 
+**Upgrading from 3.1.0.** That release shipped two data-loss defects, and if you
+hit either of them your stored state may hold fewer products than the seed
+catalog: the server would list all thirteen and then refuse to sell one of them,
+committing the shortfall so it survived every restart. **3.1.1 repairs this on
+its own** — starting it re-adds the missing seed products, and the first write
+that follows saves the repaired catalog back, so there is no manual step.
+Install 3.1.1 and restart. Nothing you placed is lost: orders recorded against
+the missing products are still in the database and resolve again once the
+products are back. See the
+[3.1.0 release notes](https://github.com/CoderGamerUnknow/Project-Tango/releases/tag/v3.1.0).
+
 The store is deliberately forgiving, because this process is a background child of
 someone else's app: saves are atomic (one transaction for the whole snapshot), an
 unreadable, corrupt, wrong-shape or wrong-version store degrades to the seed
@@ -227,6 +238,20 @@ current therefore costs one query per read rather than a full reload, and a
 server that never wrote anything still sees what everyone else did. A read never
 happens mid-transaction, so a reload can never discard a write that has not
 committed yet.
+
+The token is a required part of the `StateStore` contract, not an optional extra.
+A backend that genuinely cannot detect another writer has to say so with
+`stableToken(reason)` rather than omit the member, so "this one goes stale" is a
+decision someone wrote down instead of a gap nobody noticed. The suite holds two
+real server processes against one data directory through a soak — 40 commits
+spread over four products while the reader serves hundreds of interleaved
+`list_all_products` calls — and asserts the properties that matter under load
+rather than on a single sample: no read ever trails a committed write by more
+than one commit, the reader becomes current within three reads of the writer going
+quiet, it follows the stream rather than jumping once at the end, and it never
+serves a catalog mid-write or reports stock moving backwards. The check itself is
+pinned by a performance guard: it must stay at least 20x cheaper than the reload
+it avoids (measured ~72x on the shipped dataset).
 
 `PROJECT_TANGO_STORE=json` keeps the previous whole-snapshot backend available,
 and its guarantee is deliberately narrower: it publishes one process's complete

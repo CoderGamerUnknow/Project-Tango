@@ -61,8 +61,7 @@ export interface StateStore {
   ) => Promise<T>;
 
   /**
-   * A cheap token that changes when *another process* committed, if the backend
-   * can tell.
+   * A cheap token that changes when *another process* committed.
    *
    * This is what lets a running server notice that its in-memory catalog is no
    * longer the truth without re-reading the whole store on every call. The
@@ -74,13 +73,36 @@ export interface StateStore {
    * the property needed, since the provider's own writes are already reflected
    * in its memory and must not trigger a pointless reload.
    *
-   * Optional: a backend that cannot detect another writer simply omits it, and
-   * the provider keeps the previous behaviour of trusting its own copy.
+   * The requirement is only that a rival's commit is *detectable*. A backend
+   * whose token also moves on its own writes is merely less efficient — the
+   * provider reloads once after each of its own writes instead of not at all —
+   * which is what the JSON backend does, since its token is the state file's own
+   * size and modification time. Correctness never depends on which kind a backend
+   * provides.
+   *
+   * Required, not optional. It used to be optional, which meant a backend could
+   * omit it and silently keep the old behaviour of serving a stale catalog for
+   * the life of the process — a defect visible only to whoever ran two servers
+   * at once. A backend that genuinely cannot detect another writer must say so
+   * explicitly with `stableToken(reason)`, which makes the limitation a decision
+   * someone wrote down rather than a gap nobody noticed.
    */
-  readonly changeToken?: () => string;
+  readonly changeToken: () => string;
 
   /** Release any handle the backend holds. A server exits with it. */
   close?(): void;
+}
+
+/**
+ * The token for a backend that cannot detect another writer.
+ *
+ * Returning something stable and self-describing is the point: the name shows up
+ * in logs and in any test that asserts on the contract, so "this backend cannot
+ * tell" is visible instead of being an absence.
+ */
+export function stableToken(reason: string): () => string {
+  const token = `stable:${reason}`;
+  return () => token;
 }
 
 type Logger = (message: string) => void;

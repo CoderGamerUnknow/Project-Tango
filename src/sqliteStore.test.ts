@@ -60,7 +60,7 @@ function requireChangeToken(store: StateStore): string {
     "function",
     "the SQLite store must report when another process committed"
   );
-  return store.changeToken!();
+  return store.changeToken();
 }
 
 function makeState(overrides: Partial<PersistedState> = {}): PersistedState {
@@ -749,6 +749,62 @@ describe("state file compatibility", () => {
         assert.ok(Array.isArray(raw.products) && Array.isArray(raw.orders));
       } finally {
         rmSync(dir2, { recursive: true, force: true });
+      }
+    });
+  });
+});
+describe("changeToken cost", () => {
+  it("stays far cheaper than the reload it avoids", async () => {
+    // Freshness is only worth having if the check is cheap: it runs before every
+    // read. The ratio depends on the catalog — measured ~13x for a single-row
+    // store and ~100x for the 13-product, 150-order dataset the server actually
+    // serves — so the store here is that dataset and the assertion is a margin
+    // both ends clear. What must not happen is the check costing as much as the
+    // reload it skips, which is what a naive `db.prepare()` per call did.
+    await withTempDir((dir) => {
+      const store = createSqliteStore(dir)!;
+      try {
+        const seeded = makeState();
+        store.save({
+          ...seeded,
+          products: Array.from({ length: 13 }, (_, i) => ({
+            ...seeded.products[0]!,
+            id: `prod_${i}`,
+            name: `Product ${i}`,
+            sku: `SKU-${i}`,
+            tags: ["alpha", "beta"],
+          })),
+          orders: Array.from({ length: 150 }, (_, i) => ({
+            ...seeded.orders[0]!,
+            id: `ord_${i}`,
+            customerName: `Customer ${i}`,
+          })),
+        });
+        const other = createSqliteStore(dir)!;
+        try {
+          const perCall = (label: string, times: number, run: () => void): bigint => {
+            // Warm up first: the first call pays for lazily-built internals that
+            // no steady-state read would.
+            for (let i = 0; i < 50; i++) run();
+            const started = process.hrtime.bigint();
+            for (let i = 0; i < times; i++) run();
+            const each = BigInt(Math.round(Number(process.hrtime.bigint() - started) / times));
+            console.log(`      ${label}: ${each} ns/op`);
+            return each;
+          };
+
+          const token = perCall("changeToken", 2000, () => other.changeToken());
+          const load = perCall("full load  ", 100, () => store.load());
+
+          assert.ok(
+            token * 20n < load,
+            `changeToken (${token}ns) should be >20x cheaper than a reload (${load}ns)`
+          );
+        } finally {
+          other.close?.();
+        }
+      } finally {
+        store.close?.();
       }
     });
   });

@@ -38,9 +38,36 @@ gives every release a verified artifact.
   (`PRAGMA data_version`, `stat` on the JSON backend) and reload only when
   another process committed. The check is skipped during a transaction, where a
   reload would discard state that has not committed yet.
+- **A rejected save reported itself as a successful one.** `save()` swallowed
+  every write failure and logged it, which is right for the environment (a
+  read-only disk, a closed handle) and wrong for the data: `SQLITE_CONSTRAINT`
+  means the rows are not storable, which is a defect in what was built rather
+  than where it is stored. That combination is how a caller comes to believe an
+  order was placed when the transaction behind it was rolled back — the exact
+  "silent partial write" this project promises cannot happen. Constraint failures
+  are now rethrown; environmental ones still degrade with a warning.
+
+### Changed
+
+- **`StateStore.changeToken` is required.** It was optional, which meant a
+  backend could omit it and silently keep serving a catalog another process had
+  replaced — the exact defect this release exists to fix, reachable again by the
+  next backend added. A backend that cannot detect another writer now returns
+  `stableToken(reason)`, so the limitation is written down where a reader of
+  the code will trip over it. Every store `resolveStateStore` can return is
+  asserted to provide one.
 
 ### Added
 
+- **Freshness is verified under load, not just on a single sample.** Two real
+  server processes, one data directory, forty commits spread across four products
+  while the reader serves hundreds of interleaved reads. The assertions are the
+  ones that only fail after the two have been running long enough to drift: no
+  read trails a committed write by more than one commit, the reader is current
+  within three reads of the writer going quiet, it follows the stream instead of
+  jumping once at the end, and it never serves a catalog mid-write or reports
+  stock moving backwards. Both ways of breaking it were confirmed to fail the
+  suite — pinning the token, and refreshing only one read in sixty.
 - **Releases carry a verified installable tarball.** A new workflow builds it,
   installs it into a clean directory, drives the binary that install ships, and
   only then attaches it to the release — on `release: published`, so it happens
@@ -50,9 +77,10 @@ gives every release a verified artifact.
   file on every framing tried, so a "successful" upload produced an unusable
   download). Attaching from a runner also means the published file is the one
   that was executed, not one built alongside the release and never run.
-- **`StateStore.changeToken?()`** — an optional cheap token that moves when
-  another process committed. Optional on purpose: a backend that cannot detect
-  another writer keeps the previous behaviour instead of re-reading blindly.
+- **`StateStore.changeToken`** — a cheap token that moves when another process
+  committed, so a read can decide whether it needs to reload without loading
+  anything to find out. Added here, and required rather than optional — see
+  *Changed* above for why omission is not an option.
 - **Order ids carry their process id.** `nextOrderId` proved unique only within
   one process: its sequence is module state, so two servers sharing a data
   directory minted the *same* id for orders placed in the same millisecond. With
@@ -60,17 +88,6 @@ gives every release a verified artifact.
   second write was rejected outright — one server's order could not be placed at
   all. The pid closes the gap with no randomness: two live processes cannot share
   one, and a recycled pid only collides with an id from a different millisecond.
-
-### Fixed
-
-- **A rejected save reported itself as a successful one.** `save()` swallowed
-  every write failure and logged it, which is right for the environment (a
-  read-only disk, a closed handle) and wrong for the data: `SQLITE_CONSTRAINT`
-  means the rows are not storable, which is a defect in what was built rather
-  than where it is stored. That combination is how a caller comes to believe an
-  order was placed when the transaction behind it was rolled back — the exact
-  "silent partial write" this project promises cannot happen. Constraint failures
-  are now rethrown; environmental ones still degrade with a warning.
 
 ## [3.1.0] — 2026-10-04
 

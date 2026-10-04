@@ -362,14 +362,15 @@ export class MockDataProvider implements DataProvider {
    * Two guards keep it cheap and safe:
    *
    *  - it costs one `changeToken()` call, and reloads only when that token moved.
-   *    A store with no token (or a backend that cannot detect another writer)
-   *    simply never refreshes, which is the behaviour this project always had;
+   *    `changeToken` is required on the contract, so there is no path where a
+   *    backend forgets it and this silently stops working; one that genuinely
+   *    cannot detect another writer returns a stable token via `stableToken()`
+   *    and keeps the old behaviour deliberately, with the reason in its name;
    *  - it never runs inside a transaction. Reloading then would replace the
    *    uncommitted state a running transaction is part-way through building,
    *    so the in-transaction view is left alone and picks up the next commit.
    */
   private refresh(): void {
-    if (this.store.changeToken === undefined) return;
     if (this.transactionContext.getStore() === true) return;
     if (this.inFlight > 0) return;
 

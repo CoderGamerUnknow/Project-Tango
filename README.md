@@ -9,6 +9,9 @@ Project Tango ships with a realistic mock dataset so it works in under a minute 
 - **State survives a restart** — writes land in a local JSON file, not in memory that evaporates when the MCP client relaunches the process.
 - **Production-ready TypeScript**, strict mode, fully typed domain model.
 
+Release history, including a divergent `v2.0.0` lineage that was never merged
+into `main`: see [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## What's inside
@@ -100,7 +103,7 @@ npm run test:coverage # the suite under coverage, with minimum thresholds
 npm run verify        # typecheck + lint + coverage + build, in one shot
 ```
 
-210 tests, no test framework to install — Node's built-in test runner drives
+217 tests, no test framework to install — Node's built-in test runner drives
 `tsx`. The
 suites are typechecked before they run (`pretest` → `npm run typecheck`), which
 covers them as well as the source; previously only the source was checked, so a
@@ -145,9 +148,10 @@ The suite runs in five layers:
   `createServer(provider)` against a stub `DataProvider` over the SDK's
   in-memory transport — the proof that swapping providers needs no process and
   no module rewiring.
-- **Docs** (`src/docs.test.ts`) reads the README as text and pins its claims —
-  dataset figures, structure tree, tool names — to the code and data they
-  describe, so documentation cannot rot quietly.
+- **Docs** (`src/docs.test.ts`) reads the README and changelog as text and pins
+  their claims — dataset figures, structure tree, tool names, release headings,
+  release dates, and the divergent `v2.0.0` lineage — to the code, the data and
+  the git tags they describe, so documentation cannot rot quietly.
 
 Every server the tests launch is pinned to a temp data directory, so running the
 suite never touches your real `~/.project-tango` catalog.
@@ -325,6 +329,7 @@ project-tango/
 │   ├── index.ts        # Process bootstrap: picks the provider, connects stdio
 │   ├── testHelpers.ts  # Shared fixtures + stdio launcher for the suites
 │   └── *.test.ts      # Unit, e2e, lifecycle, in-process seam and docs suites
+├── CHANGELOG.md      # Release history, pinned to the tags by src/docs.test.ts
 └── README.md
 ```
 

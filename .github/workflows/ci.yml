@@ -8,7 +8,14 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # `fetch-depth: 0` is required, not a convenience: `src/docs.test.ts` pins
+      # CHANGELOG.md to the release history — it reads the tags and each tag's
+      # commit date. The default shallow clone (depth 1, no tags) left those
+      # checks failing with "unknown revision v3.0.1", so the guard that is
+      # supposed to keep the changelog honest was itself unverifiable in CI.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:

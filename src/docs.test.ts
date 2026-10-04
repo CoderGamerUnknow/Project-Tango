@@ -119,6 +119,48 @@ describe("CHANGELOG", () => {
   /** Versions as `[3.0.1]` headings, newest first as written. */
   const documented = [...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map((m) => m[1]!);
 
+  /**
+   * Release tags, or a hard stop that says how to get them.
+   *
+   * These checks read real history rather than a checked-in copy of it, so they
+   * need tags and full commits. A shallow clone (`git clone --depth 1`, which is
+   * also what CI's checkout defaults to) has neither, and without this the
+   * failures read as "unknown revision 'v3.0.1'" — a genuine stop rather than a
+   * silent pass, because a skipped guard is worse than no guard.
+   */
+  function releaseTags(): string[] {
+    const tags = execFileSync("git", ["tag", "-l", "v*"], { cwd: ROOT, encoding: "utf8" })
+      .split("\n")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    assert.ok(
+      tags.length > 0,
+      "no release tags in this clone — the CHANGELOG checks need full history. " +
+        "Use `git fetch --unshallow --tags`, or run CI with `fetch-depth: 0`."
+    );
+    return tags;
+  }
+
+  /** The date a tag was cut, failing loudly if the tag does not resolve. */
+  function tagDate(version: string): string {
+    const cut = execFileSync("git", ["log", "-1", "--format=%aI", `v${version}`], {
+      cwd: ROOT,
+      encoding: "utf8",
+    }).trim();
+    return new Date(cut).toISOString().slice(0, 10);
+  }
+
+  /** Tags reachable from `main`, i.e. releases of the code in this branch. */
+  function tagsOnMain(): string[] {
+    return execFileSync("git", ["tag", "-l", "--merged", "main", "v*"], {
+      cwd: ROOT,
+      encoding: "utf8",
+    })
+      .split("\n")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+
   it("has at least one release documented", () => {
     assert.ok(documented.length > 0, "CHANGELOG.md documents no releases");
   });
@@ -127,32 +169,18 @@ describe("CHANGELOG", () => {
     // Only tags reachable from `main` get a version heading: `v2.0.0` is not on
     // this lineage (asserted below), and giving it a heading here would imply it
     // is a release of the code in this branch.
-    const tags = execFileSync("git", ["tag", "-l", "--merged", "main", "v*"], {
-      cwd: ROOT,
-      encoding: "utf8",
-    })
-      .split("\n")
-      .map((t) => t.trim().replace(/^v/, ""))
-      .filter(Boolean);
+    releaseTags();
 
-    for (const version of tags) {
-      assert.ok(documented.includes(version), `tag v${version} is on main but the CHANGELOG omits it`);
+    for (const tag of tagsOnMain()) {
+      const version = tag.replace(/^v/, "");
+      assert.ok(documented.includes(version), `tag ${tag} is on main but the CHANGELOG omits it`);
     }
   });
 
   it("mentions any tag that is not on this lineage, rather than dropping it", () => {
-    const all = execFileSync("git", ["tag", "-l", "v*"], { cwd: ROOT, encoding: "utf8" })
-      .split("\n")
-      .map((t) => t.trim())
-      .filter(Boolean);
-    const merged = new Set(
-      execFileSync("git", ["tag", "-l", "--merged", "main", "v*"], { cwd: ROOT, encoding: "utf8" })
-        .split("\n")
-        .map((t) => t.trim())
-        .filter(Boolean)
-    );
+    const merged = new Set(tagsOnMain());
+    const orphans = releaseTags().filter((t) => !merged.has(t));
 
-    const orphans = all.filter((t) => !merged.has(t));
     assert.ok(orphans.length > 0, "this test is vacuous unless some tag is off-lineage");
     for (const tag of orphans) {
       assert.ok(changelog.includes(tag), `tag ${tag} exists but the CHANGELOG never mentions it`);
@@ -190,12 +218,10 @@ describe("CHANGELOG", () => {
   });
 
   it("states the release date a tag was actually cut on", () => {
+    releaseTags();
+
     for (const version of documented) {
-      const cut = execFileSync("git", ["log", "-1", "--format=%aI", `v${version}`], {
-        cwd: ROOT,
-        encoding: "utf8",
-      }).trim();
-      const date = new Date(cut).toISOString().slice(0, 10);
+      const date = tagDate(version);
       assert.ok(
         changelog.includes(`## [${version}] — ${date}`),
         `[${version}] was tagged on ${date}, which the CHANGELOG does not state`

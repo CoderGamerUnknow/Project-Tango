@@ -6,11 +6,12 @@ Project Tango ships with a realistic mock dataset so it works in under a minute 
 
 - **Runs entirely on your machine** over stdio — no server to deploy, no database to host.
 - **$0 infrastructure cost.**
-- **State survives a restart** — writes land in a local JSON file, not in memory that evaporates when the MCP client relaunches the process.
+- **State survives a restart** — writes land in a local SQLite database, not in memory that evaporates when the MCP client relaunches the process.
 - **Production-ready TypeScript**, strict mode, fully typed domain model.
 
 Release history, including a divergent `v2.0.0` lineage that was never merged
-into `main`: see [CHANGELOG.md](CHANGELOG.md).
+into `main` (its trie search is ported here; see
+[CHANGELOG.md](CHANGELOG.md)).
 
 ---
 
@@ -18,7 +19,7 @@ into `main`: see [CHANGELOG.md](CHANGELOG.md).
 
 | Tool | What it does |
 |---|---|
-| `list_all_products` | Browse the catalog, filtered by category, price range, or free-text search |
+| `list_all_products` | Browse the catalog, filtered by category, price range, or free-text search — results ranked so a product whose own name, SKU, category or tag matches ranks above one that merely mentions the term |
 | `get_low_stock_alerts` | Scans inventory and flags `low` / `critical` stock levels, optionally for one category |
 | `analyze_sales_metrics` | Gross revenue, AOV, top sellers, order-status breakdown, and a daily trend with a recent-vs-previous comparison — all optionally scoped to one category |
 | `smart_restock_predictor` | Ranks low-stock items by days of cover and recommends an exact reorder quantity for each, optionally within one category |
@@ -103,7 +104,7 @@ npm run test:coverage # the suite under coverage, with minimum thresholds
 npm run verify        # typecheck + lint + coverage + build, in one shot
 ```
 
-217 tests, no test framework to install — Node's built-in test runner drives
+254 tests, no test framework to install — Node's built-in test runner drives
 `tsx`. The
 suites are typechecked before they run (`pretest` → `npm run typecheck`), which
 covers them as well as the source; previously only the source was checked, so a
@@ -125,15 +126,19 @@ The suite runs in five layers:
 
 - **Unit** (`src/catalog.test.ts`, `src/orderAnalytics.test.ts`,
   `src/restock.test.ts`, `src/productCopy.test.ts`, `src/storage.test.ts`,
-  `src/mockData.test.ts`, `src/reviewPrompt.test.ts`) pins the business logic,
-  the state store, the provider, and the rendered review prompt directly:
+  `src/sqliteStore.test.ts`, `src/mockData.test.ts`, `src/reviewPrompt.test.ts`)
+  pins the business logic, the state store, the search index, the provider, and
+  the rendered review prompt directly:
   velocity
   math, lookback-window resolution, threshold boundaries, order-line
   aggregation, revenue attribution, order drill-down, category scoping, sales
   trend, copy generation, persistence atomicity/recovery, transaction rollback,
   and read isolation (`MockDataProvider` hands out copies, never live
-  references). Each unit suite pairs with the module it covers, so the split is
-  visible in the tests too.
+  references). `src/sqliteStore.test.ts` additionally opens real databases: it
+  proves the store waits out another process's lock instead of falling back, that
+  a rolled-back transaction leaves the store usable, and that search ranking
+  never drops a substring match. Each unit suite pairs with the module it
+  covers, so the split is visible in the tests too.
 - **End-to-end** (`src/tools.test.ts`) drives a single long-lived server over
   stdio with the MCP SDK's own client, covering tool registration, declared
   output schemas, structured responses, the prompt and resource surface, scoped
@@ -142,8 +147,9 @@ The suite runs in five layers:
 - **Lifecycle** (`src/persistence.test.ts`) restarts real server processes to
   prove state survives, seed rows reconcile correctly, corrupt files recover,
   and `reset_demo_state` works — including that a rejected order does not poison
-  the transaction queue for later callers, and that two server processes racing
-  on one data directory publish a complete state file rather than a torn one.
+  the transaction queue for later callers, that two server processes racing on
+  one data directory both keep their writes, and that ten concurrent orders
+  against 42 units of stock accept exactly eight.
 - **In-process seam** (`src/server.test.ts`) builds the entire MCP surface with
   `createServer(provider)` against a stub `DataProvider` over the SDK's
   in-memory transport — the proof that swapping providers needs no process and
@@ -176,32 +182,46 @@ process — MCP clients relaunch the server routinely, and an agent that places 
 order in one session then asks about inventory in the next would otherwise be
 told about a catalog state that no longer exists.
 
-State is written to `state.json` after every mutation and restored on startup.
+State is written to `state.db` — a SQLite database — after every mutation and
+restored on startup.
 
 | Variable | Effect |
 |---|---|
-| `PROJECT_TANGO_DATA_DIR` | Directory holding `state.json`. Defaults to `~/.project-tango`. A fixed absolute path is used because an MCP client launches the server from an arbitrary working directory. |
+| `PROJECT_TANGO_DATA_DIR` | Directory holding the state database. Defaults to `~/.project-tango`. A fixed absolute path is used because an MCP client launches the server from an arbitrary working directory. |
 | `PROJECT_TANGO_PERSIST=0` | Disable persistence entirely — the original in-memory behaviour, for throwaway or CI runs. |
+| `PROJECT_TANGO_STORE=json` | Use the older whole-snapshot JSON file instead of SQLite. Useful on a runtime without `node:sqlite` (Node < 22.5), but see the concurrency note below. |
 
-Delete `state.json` to reset back to the seed dataset. Saved state is reconciled
+Delete `state.db` to reset back to the seed dataset. Saved state is reconciled
 against the seed catalog rather than replacing it: products present in the state
 file win (they carry the real stock history), while seed products missing from
 it are re-added, so editing the catalog still takes effect. The server logs what
 it restored on startup.
 
-The store is deliberately forgiving, because this process is a background child of
-someone else's app: saves are atomic (a per-write temp file + rename, so a crash
-mid-write cannot truncate good state), and an unreadable, corrupt, wrong-shape or
-wrong-version file degrades to the seed dataset with a warning on stderr rather
-than taking the tools down.
+An existing `state.json` from an earlier version is imported automatically on
+first run — validated record by record, exactly as the JSON store did, so a
+malformed record is dropped rather than becoming a runtime failure — and the old
+file is kept as `state.json.migrated`.
 
-Concurrency has one honest boundary: state is read once at startup, so two
-server processes sharing one data directory do not see each other's writes.
-Each save still publishes one process's complete snapshot (the per-write temp
-name keeps two writers from interleaving bytes into the same file), so the worst
-a race can do is last-writer-wins — never a torn file. The suite drives two
-servers against one directory to pin that. Run one server per data directory
-for coherent state.
+The store is deliberately forgiving, because this process is a background child of
+someone else's app: saves are atomic (one transaction for the whole snapshot), an
+unreadable, corrupt, wrong-shape or wrong-version store degrades to the seed
+dataset with a warning on stderr rather than taking the tools down, and a
+read-only data directory disables persistence with a warning instead of crashing.
+
+**Concurrency.** Order placement wraps its read-validate-write in a SQLite
+`BEGIN IMMEDIATE` transaction, which takes the database's write lock before the
+first read. Two server processes sharing one data directory therefore serialise:
+each validates against the state as of the moment it acquired the lock, so one
+cannot pass a stock check against a snapshot the other has already moved past.
+The suite drives two real server processes against one directory to pin this —
+both orders survive, stock reflects both, and ten racing attempts at 5 units
+against a stock of 42 fill exactly eight orders rather than driving inventory
+negative. The lock is released on commit, rollback, or process death.
+
+`PROJECT_TANGO_STORE=json` keeps the previous whole-snapshot backend available,
+and its guarantee is deliberately narrower: it publishes one process's complete
+snapshot (never a torn file) but is still last-writer-wins across processes,
+because `load()`/`save()` cannot be made atomic between two independent copies.
 
 ## Connecting Project Tango to an MCP client
 
@@ -314,7 +334,9 @@ project-tango/
 │   ├── types.ts        # Domain types + DataProvider interface
 │   ├── schemas.ts      # Zod response schemas — the source of truth for shapes
 │   ├── conventions.ts  # Rules shared by several analytics modules (rounding, blank input)
-│   ├── catalog.ts      # Product filtering + low-stock alerts
+│   ├── catalog.ts      # Product filtering + low-stock alerts + search ranking
+│   ├── productIndex.ts # Prefix index that ranks search results (ported from the v2.0.0 lineage)
+│   ├── sqliteStore.ts  # SQLite durable store with cross-process write transactions
 │   ├── orderAnalytics.ts # Windowing, sales metrics, trend, order drill-down + buildOrder (order + stock writes)
 │   ├── restock.ts      # Restocking policy + demand-velocity planning
 │   ├── productCopy.ts  # Marketing copy + its per-tag voice tables
@@ -325,9 +347,10 @@ project-tango/
 │   ├── mockData.ts     # MockDataProvider (read this to implement DataProvider)
 │   ├── seedCatalog.ts  # The 13-product starter catalog
 │   ├── orderGenerator.ts # Deterministic seeded order history
-│   ├── storage.ts      # Durable state: atomic JSON store + recovery
+│   ├── storage.ts      # Durable state: store selection, atomic JSON store, recovery
 │   ├── index.ts        # Process bootstrap: picks the provider, connects stdio
 │   ├── testHelpers.ts  # Shared fixtures + stdio launcher for the suites
+│   ├── testGlobalSetup.ts # Pins every test process to a throwaway data directory
 │   └── *.test.ts      # Unit, e2e, lifecycle, in-process seam and docs suites
 ├── CHANGELOG.md      # Release history, pinned to the tags by src/docs.test.ts
 └── README.md

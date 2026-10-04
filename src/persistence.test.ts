@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
@@ -22,6 +22,24 @@ async function readProduct(c: Client, id: string): Promise<any> {
     (p: { id: string }) => p.id === id
   );
 }
+
+describe("suite hygiene", () => {
+  it("runs against a throwaway data directory, never the real catalog", () => {
+    // `mockData.ts` opens its store — and so creates `state.db` — at import
+    // time, so a suite that imports the provider in-process writes to whatever
+    // `PROJECT_TANGO_DATA_DIR` says. Left unset, that is `~/.project-tango`, and
+    // a test run would overwrite a real catalog. `src/testGlobalSetup.ts` pins
+    // the directory for every test process; this fails if the npm scripts ever
+    // stop passing it.
+    const dir = process.env.PROJECT_TANGO_DATA_DIR;
+    assert.ok(dir, "the suite must pin PROJECT_TANGO_DATA_DIR (see src/testGlobalSetup.ts)");
+    assert.notEqual(
+      resolve(dir),
+      join(homedir(), ".project-tango"),
+      "the suite must not run against the real ~/.project-tango catalog"
+    );
+  });
+});
 
 /**
  * Run `fn` against a server pinned to a throwaway data directory, optionally
@@ -307,8 +325,13 @@ describe("persistence", () => {
 // ---------------------------------------------------------------------------
 
 describe("concurrent server processes", () => {
-  it("publishes one complete state file when two writers race, never a torn mix", async () => {
-    await withSession(async (boot, dir) => {
+  it("loses no writes when two server processes race on one data directory", async () => {
+    // This is the test the SQLite store exists for. Under the old whole-snapshot
+    // JSON store both processes loaded the seed before either saved, so the
+    // second save silently discarded the first process's order — the documented
+    // "last-writer-wins" caveat. `BEGIN IMMEDIATE` makes each transaction read
+    // the state as of the moment it took the lock, so both orders must survive.
+    await withSession(async (boot) => {
       const first = await boot();
       const second = await boot();
 
@@ -318,7 +341,7 @@ describe("concurrent server processes", () => {
             name: "simulate_order_placement",
             arguments: {
               customer_name: "Race Writer",
-              items: [{ product_id: "prod_001", quantity: 1 }],
+              items: [{ product_id: "prod_001", quantity: 5 }],
             },
           })
         );
@@ -330,40 +353,134 @@ describe("concurrent server processes", () => {
         await first.close();
         await second.close();
       }
+
       for (const receipt of placed) {
-        assert.equal(receipt.success, true);
+        assert.equal(receipt.success, true, "both orders had stock available and must succeed");
       }
 
-      // Both processes loaded the seed before either saved (state is read at
-      // startup), so the surviving file is one writer's complete snapshot:
-      // seed (142 orders) plus at most one of the two — 143, or 144 if one
-      // process saved before the other read. What must never appear is a torn
-      // interleaving of both: that is what the per-write temp file prevents.
+      // A fresh process must see both orders and the stock both of them removed.
+      // Under last-writer-wins this was 143 orders and 37 units; the guarantee
+      // now is 144 orders and 32.
+      const third = await boot();
+      try {
+        const list = parse(await third.callTool({ name: "list_all_products", arguments: {} }));
+        assert.equal(list.count, 13, "the catalog must still be complete");
+        const stock = list.products.find((p: { id: string }) => p.id === "prod_001");
+        assert.equal(
+          stock.inventoryCount,
+          42 - 10,
+          `both orders must be reflected in stock; saw ${stock.inventoryCount}, expected 32`
+        );
+
+        const orders = parse(
+          await third.callTool({ name: "find_orders", arguments: { customer_name: "Race Writer" } })
+        );
+        assert.equal(orders.count, 2, "neither process's order may be lost to the other");
+        const ids = new Set(orders.orders.map((o: { id: string }) => o.id));
+        assert.equal(ids.size, 2, "the two orders must have distinct ids");
+      } finally {
+        await third.close();
+      }
+    });
+  });
+
+  it("never oversells when more orders race than there is stock for", async () => {
+    // The same lock, exercised against genuinely contested stock: 10 attempts at
+    // 5 units against a seed of 42 can only fill 8 orders, and the store must
+    // refuse the rest rather than drive inventory negative.
+    await withSession(async (boot) => {
+      const clients = await Promise.all(Array.from({ length: 4 }, () => boot()));
+      const stockBefore = parse(
+        await clients[0]!.callTool({ name: "list_all_products", arguments: {} })
+      ).products.find((p: { id: string }) => p.id === "prod_001").inventoryCount;
+
+      const place = async (c: Client) =>
+        c.callTool({
+          name: "simulate_order_placement",
+          arguments: {
+            customer_name: "Contested",
+            items: [{ product_id: "prod_001", quantity: 5 }],
+          },
+        });
+
+      try {
+        const results = await Promise.all(
+          Array.from({ length: 10 }, (_, i) => place(clients[i % clients.length]!))
+        );
+        // A refusal carries a plain-sentence error, not JSON, so results are
+        // classified by `isError` before anything tries to parse them.
+        const accepted = results.filter((r) => r.isError !== true);
+        const refused = results.filter((r) => r.isError === true);
+        const capacity = Math.floor(stockBefore / 5);
+
+        assert.equal(
+          accepted.length,
+          capacity,
+          `exactly ${capacity} orders of 5 should fit in ${stockBefore} units, got ${accepted.length}`
+        );
+        for (const receipt of accepted) {
+          assert.equal(parse(receipt).success, true);
+        }
+        for (const loser of refused) {
+          assert.match(
+            (loser.content as Array<{ text: string }>)[0]!.text,
+            /Order rejected/,
+            "every refused order must say why"
+          );
+        }
+
+        const verifier = await boot();
+        try {
+          const list = parse(await verifier.callTool({ name: "list_all_products", arguments: {} }));
+          const stock = list.products.find((p: { id: string }) => p.id === "prod_001");
+          assert.equal(stock.inventoryCount, stockBefore - accepted.length * 5);
+          assert.ok(stock.inventoryCount >= 0, "inventory must never go negative");
+        } finally {
+          await verifier.close();
+        }
+      } finally {
+        await Promise.all(clients.map((c) => c.close()));
+      }
+    });
+  });
+
+  it("still publishes a complete, untorn snapshot when the JSON store is forced", async () => {
+    // `PROJECT_TANGO_STORE=json` keeps the old whole-snapshot backend available,
+    // and its guarantee is narrower by design: never a torn file, but still
+    // last-writer-wins. Pinning that here documents exactly what the fallback
+    // does and does not promise.
+    await withSession(async (boot, dir) => {
+      const first = await boot({ PROJECT_TANGO_STORE: "json" });
+      const second = await boot({ PROJECT_TANGO_STORE: "json" });
+
+      const place = async (c: Client) =>
+        c.callTool({
+          name: "simulate_order_placement",
+          arguments: {
+            customer_name: "Json Writer",
+            items: [{ product_id: "prod_001", quantity: 1 }],
+          },
+        });
+
+      try {
+        await Promise.all([place(first), place(second)]);
+      } finally {
+        await first.close();
+        await second.close();
+      }
+
       const state = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
       assert.equal(state.version, 1);
       assert.equal(state.products.length, 13);
       assert.ok(
         state.orders.length === 143 || state.orders.length === 144,
-        `state should hold seed + at most one race order, saw ${state.orders.length}`
+        `JSON store should hold seed + at most one race order, saw ${state.orders.length}`
       );
-      assert.ok(
-        state.products.every((p: { inventoryCount: number }) => p.inventoryCount >= 0),
-        "no product may go negative in a race"
-      );
+      assert.ok(state.products.every((p: { inventoryCount: number }) => p.inventoryCount >= 0));
       assert.ok(
         !readdirSync(dir).some((f) => f.includes(".tmp")),
         "temp files must not be left behind"
       );
-
-      // Last-writer-wins is a documented limitation; unusable state is not.
-      // A fresh process must serve the surviving snapshot.
-      const third = await boot();
-      try {
-        const list = parse(await third.callTool({ name: "list_all_products", arguments: {} }));
-        assert.equal(list.count, 13);
-      } finally {
-        await third.close();
-      }
     });
   });
 });

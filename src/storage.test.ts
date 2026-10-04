@@ -334,29 +334,49 @@ describe("createFileStore", () => {
 });
 
 describe("resolveStateStore", () => {
-  it("returns an in-memory store when persistence is disabled", () => {
-    const store = resolveStateStore({ PROJECT_TANGO_PERSIST: "0" });
+  it("returns an in-memory store when persistence is disabled", async () => {
+    const store = await resolveStateStore({ PROJECT_TANGO_PERSIST: "0" });
     assert.match(store.description, /in-memory/);
   });
 
-  it("honours an explicit data directory", () => {
+  it("honours an explicit data directory", async () => {
     const dir = join(tmpdir(), "explicit-store");
-    const store = resolveStateStore({ PROJECT_TANGO_DATA_DIR: dir });
+    const store = await resolveStateStore({ PROJECT_TANGO_DATA_DIR: dir });
+    // SQLite is the default backend: it gives the cross-process transaction the
+    // JSON file could not.
+    assert.equal(store.description, `${join(dir, "state.db")} (SQLite, WAL)`);
+  });
+
+  it("falls back to the JSON file when the JSON backend is forced explicitly", async () => {
+    const dir = join(tmpdir(), "forced-json-store");
+    const store = await resolveStateStore({ PROJECT_TANGO_DATA_DIR: dir, PROJECT_TANGO_STORE: "json" });
     assert.equal(store.description, join(dir, "state.json"));
+    assert.equal(store.update, undefined, "the JSON backend cannot provide a cross-process lock");
   });
 
-  it("falls back to a stable path under the home directory", () => {
-    const store = resolveStateStore({});
+  it("provides an exclusive transaction by default, so writes are not last-writer-wins", async () => {
+    const store = await resolveStateStore({ PROJECT_TANGO_DATA_DIR: join(tmpdir(), "locking-store") });
+    assert.equal(typeof store.update, "function", "the default store must offer a locked read-modify-write");
+    store.close?.();
+  });
+
+  it("falls back to a stable path under the home directory", async () => {
+    // The JSON backend is forced because these two cases are about *path
+    // resolution*. The SQLite store creates its file when it is constructed, so
+    // asking for the default directory under the default backend would write a
+    // real `state.db` into the developer's home directory — a test run must
+    // never create the catalog it is meant to be protecting.
+    const store = await resolveStateStore({ PROJECT_TANGO_STORE: "json" });
     assert.match(store.description, /\.project-tango/);
   });
 
-  it("treats a blank data directory as unset rather than writing to the cwd", () => {
-    const store = resolveStateStore({ PROJECT_TANGO_DATA_DIR: "   " });
+  it("treats a blank data directory as unset rather than writing to the cwd", async () => {
+    const store = await resolveStateStore({ PROJECT_TANGO_DATA_DIR: "   ", PROJECT_TANGO_STORE: "json" });
     assert.match(store.description, /\.project-tango/);
   });
 
-  it("ignores a data directory when persistence is disabled", () => {
-    const store = resolveStateStore({ PROJECT_TANGO_PERSIST: "0", PROJECT_TANGO_DATA_DIR: "/tmp/x" });
+  it("ignores a data directory when persistence is disabled", async () => {
+    const store = await resolveStateStore({ PROJECT_TANGO_PERSIST: "0", PROJECT_TANGO_DATA_DIR: "/tmp/x" });
     assert.match(store.description, /in-memory/);
   });
 });

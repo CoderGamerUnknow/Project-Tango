@@ -1,4 +1,5 @@
 import { trimmed } from "./conventions.js";
+import { ProductIndex } from "./productIndex.js";
 import type { AlertSeverity, InventoryAlert, Product } from "./types.js";
 
 /**
@@ -64,6 +65,39 @@ export function filterProducts(products: Product[], filters: ProductFilters): Pr
       if (!haystack.includes(search)) return false;
     }
     return true;
+  });
+}
+
+/**
+ * Order search results by how well they matched, keeping every match.
+ *
+ * Recall is unchanged from `filterProducts`: the substring match decides *which*
+ * products are returned, exactly as before. The prefix index only decides their
+ * *order*, so a product whose own token is the query ("usbc" as a tag) appears
+ * above one that merely contains the text somewhere in its description. This is
+ * the part the `v2.0.0` lineage got wrong — it let the index filter as well, and
+ * lost matches that substring search found.
+ *
+ * A product the index does not know about (a caller passing an ad-hoc array)
+ * still appears, at the end of its group, rather than disappearing.
+ */
+export function rankProducts(products: Product[], search: string): Product[] {
+  const trimmedSearch = trimmed(search);
+  if (!trimmedSearch) return products;
+
+  const index = new ProductIndex(products);
+  const scores = new Map(index.search(trimmedSearch).map((m) => [m.productId, m.score]));
+
+  return [...products].sort((a, b) => {
+    const scoreA = scores.get(a.id);
+    const scoreB = scores.get(b.id);
+    if (scoreA === undefined && scoreB === undefined) return 0;
+    if (scoreA === undefined) return 1;
+    if (scoreB === undefined) return -1;
+    if (scoreA !== scoreB) return scoreB - scoreA;
+    // Deterministic tie-break, so two equally-scored products do not swap places
+    // between runs.
+    return a.id.localeCompare(b.id);
   });
 }
 

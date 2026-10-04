@@ -214,6 +214,40 @@ export class MockDataProvider implements DataProvider {
     }
 
     const run = async () => {
+      // When the store can lock, the whole read-validate-write happens *inside*
+      // that lock. Without it, each process validated against its own startup
+      // snapshot and the last save won; with it, the state `fn` reads is the
+      // state as of the moment the lock was taken, so two servers sharing a
+      // data directory serialise instead of clobbering each other.
+      if (this.store.update) {
+        return this.store.update(async (current) => {
+          // `current` is undefined on a store nothing has been written to yet.
+          // Adopting then would replace the seeded catalog with nothing, so the
+          // in-memory seed is left to stand until the store actually holds
+          // state — and once another process has written, its state wins.
+          if (current) this.adopt(current);
+
+          const revisionBefore = this.revision;
+          // Snapshot after adopting, so a rollback returns to what this
+          // transaction started from rather than to the state before it.
+          const productsBefore = this.products.map(cloneProduct);
+          const ordersBefore = this.orders.map(cloneOrder);
+
+          try {
+            const result = await this.transactionContext.run(true, () => fn(this));
+            // Commit only what this transaction actually changed, so a
+            // validation that rejected the order writes nothing.
+            const commit = this.revision !== revisionBefore ? this.snapshot() : undefined;
+            return { commit, result };
+          } catch (error) {
+            this.products = productsBefore;
+            this.orders = ordersBefore;
+            this.revision = revisionBefore;
+            throw error;
+          }
+        });
+      }
+
       const revisionBefore = this.revision;
       // Deep copy: `updateProductInventory` mutates records in place, so an
       // array-level copy would still hand the rollback the same objects.
@@ -244,6 +278,20 @@ export class MockDataProvider implements DataProvider {
     return result;
   }
 
+  /**
+   * Replace in-memory state with what the store just handed us.
+   *
+   * Records are cloned on the way in because the store's copy is shared: the
+   * memory store hands out a deep copy already, but the file and SQLite stores
+   * may return objects they still reference, and `updateProductInventory`
+   * mutates records in place.
+   */
+  private adopt(state: PersistedState | undefined): void {
+    if (!state) return;
+    this.products = state.products.map(cloneProduct);
+    this.orders = state.orders.map(cloneOrder);
+  }
+
   reset(): Promise<{ products: number; orders: number }> {
     return this.transact(() => {
       const discarded = { products: this.products.length, orders: this.orders.length };
@@ -262,7 +310,9 @@ export class MockDataProvider implements DataProvider {
  *
  * Diagnostics go to stderr because stdout carries the MCP protocol.
  */
-const stateStore = resolveStateStore(process.env, (message) => console.error(message));
+// Top-level await: the SQLite backend is loaded through a dynamic import to
+// keep `storage.ts` free of a static cycle, so resolving the store is async.
+const stateStore = await resolveStateStore(process.env, (message) => console.error(message));
 
 /** Where this process is keeping state, reported in the startup line. */
 export const stateStoreDescription = stateStore.description;

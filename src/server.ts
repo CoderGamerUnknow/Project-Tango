@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { computeLowStockAlerts, filterProducts, normaliseProductFilters } from "./catalog.js";
+import { computeLowStockAlerts, filterProducts, normaliseProductFilters, rankProducts } from "./catalog.js";
 import {
   aggregateQuantitiesByProduct,
   buildOrder,
@@ -60,7 +60,7 @@ const CATEGORY_ARG_DOC =
 export function createServer(dataProvider: DataProvider): McpServer {
   const server = new McpServer({
     name: "project-tango",
-    version: "3.0.1",
+    version: "3.1.0",
   });
 
   server.registerTool(
@@ -95,6 +95,8 @@ export function createServer(dataProvider: DataProvider): McpServer {
           .describe(
             "Free-text search matched against product name, SKU, description, tags and category. " +
               "Case-insensitive substring, so 'merino' finds the Highland Merino Wool Sweater. " +
+              "Results are ranked by match quality, so a product whose own name or tag is the query " +
+              "comes first; the set of matches is the same either way. " +
               "Combine with the other filters to narrow further."
           ),
       },
@@ -110,7 +112,7 @@ export function createServer(dataProvider: DataProvider): McpServer {
         maxPrice: max_price,
         search,
       });
-      const filtered = filterProducts(products, applied);
+      const filtered = rankProducts(filterProducts(products, applied), applied.search ?? "");
 
       return jsonResult({
         count: filtered.length,

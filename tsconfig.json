@@ -25,5 +25,5 @@
     "isolatedModules": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/testHelpers.ts"]
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/testHelpers.ts", "src/testGlobalSetup.ts"]
 }

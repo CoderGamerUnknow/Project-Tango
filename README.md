@@ -340,6 +340,7 @@ project-tango/
 ├── tsconfig.test.json
 ├── eslint.config.mjs    # Type-aware lint gate (npm run lint)
 ├── .github/workflows/ci.yml # CI: typecheck, lint, coverage floor, build, docs drift
+├── .github/workflows/release-artifact.yml # Packs, installs and smoke-tests the tarball, then attaches it to the release
 ├── src/
 │   ├── types.ts        # Domain types + DataProvider interface
 │   ├── schemas.ts      # Zod response schemas — the source of truth for shapes

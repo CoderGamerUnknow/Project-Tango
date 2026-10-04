@@ -101,6 +101,15 @@ make a server notice that another process had written.
 
 ### Added
 
+- **Releases carry a verified installable tarball.** A new workflow builds it,
+  installs it into a clean directory, drives the binary that install ships, and
+  only then attaches it to the release — on `release: published`, so it happens
+  without being asked. Two things this fixes: `v3.1.0` shipped source only, and
+  an artifact attached from a contributor's machine turned out to be corrupt
+  there (GitHub's asset endpoint stored the multipart envelope along with the
+  file on every framing tried, so a "successful" upload produced an unusable
+  download). Attaching from a runner also means the published file is the one
+  that was executed, not one built alongside the release and never run.
 - **`StateStore.changeToken?()`** — an optional cheap token that moves when
   another process committed. Optional on purpose: a backend that cannot detect
   another writer keeps the previous behaviour instead of re-reading blindly.

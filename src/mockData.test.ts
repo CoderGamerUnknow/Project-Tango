@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { MockDataProvider } from "./mockData.js";
 import { seedOrders } from "./orderGenerator.js";
 import { seedProducts } from "./seedCatalog.js";
-import { createMemoryStore, type StateStore } from "./storage.js";
+import { createMemoryStore, type PersistedState, type StateStore } from "./storage.js";
 import type { Order } from "./types.js";
 
 /**
@@ -262,5 +262,144 @@ describe("durability", () => {
     });
 
     assert.equal(store.saves, 1);
+  });
+});
+
+describe("cross-process freshness", () => {
+  /**
+   * A store that can be moved behind the provider's back.
+   *
+   * The token is what a real backend uses to say "someone else committed", and
+   * it is deliberately the *only* signal: if a provider reloads on anything else,
+   * these tests would still pass, so the token is also counted here.
+   */
+  function switchableStore(): StateStore & { publish(state: PersistedState): void; reloads: number } {
+    const inner = createMemoryStore();
+    let state: PersistedState | undefined;
+    let token = "0";
+    const store = {
+      description: inner.description,
+      load: () => (state === undefined ? undefined : structuredClone(state)),
+      save: (next: PersistedState) => {
+        state = structuredClone(next);
+      },
+      changeToken: () => token,
+      publish: (next: PersistedState) => {
+        state = structuredClone(next);
+        token = String(Number(token) + 1);
+      },
+      reloads: 0,
+    };
+    const counted = store.load;
+    store.load = () => {
+      store.reloads += 1;
+      return counted();
+    };
+    return store;
+  }
+
+  it("picks up another process's commit on the next read", async () => {
+    const store = switchableStore();
+    const provider = new MockDataProvider(seedProducts, seedOrders, store);
+    assert.equal((await provider.getProductBySku("TCH-AB-001"))!.inventoryCount, 42);
+
+    store.publish({
+      version: 1,
+      products: seedProducts.map((p) => (p.id === "prod_001" ? { ...p, inventoryCount: 5 } : p)),
+      orders: seedOrders,
+    });
+
+    assert.equal(
+      (await provider.getProductBySku("TCH-AB-001"))!.inventoryCount,
+      5,
+      "a read must not serve the copy this process started with"
+    );
+  });
+
+  it("does not re-read the store when nothing changed", async () => {
+    const store = switchableStore();
+    const provider = new MockDataProvider(seedProducts, seedOrders, store);
+    await provider.getProducts();
+    const reloadsAfterStartup = store.reloads;
+
+    await provider.getProducts();
+    await provider.getOrders();
+    await provider.getProductBySku("TCH-AB-001");
+
+    assert.equal(
+      store.reloads,
+      reloadsAfterStartup,
+      "an unchanged token must not cost a full reload on every read"
+    );
+  });
+
+  it("never reloads over a transaction that has not committed yet", async () => {
+    // A read issued while a transaction is mid-flight is in a different async
+    // context, so `transactionContext` cannot protect it — the in-flight counter
+    // is what stops the reload from discarding the uncommitted state.
+    const store = switchableStore();
+    const provider = new MockDataProvider(seedProducts, seedOrders, store);
+
+    const seen: number[] = [];
+    await provider.transact(async (p) => {
+      await p.updateProductInventory("prod_001", 7);
+      // Another process commits while this transaction is open.
+      store.publish({
+        version: 1,
+        products: seedProducts.map((s) => (s.id === "prod_001" ? { ...s, inventoryCount: 99 } : s)),
+        orders: seedOrders,
+      });
+      seen.push((await p.getProductBySku("TCH-AB-001"))!.inventoryCount);
+    });
+
+    assert.deepEqual(seen, [7], "the transaction must keep seeing its own uncommitted value");
+  });
+
+  it("sees the other process's commit once the transaction is over", async () => {
+    const store = switchableStore();
+    const provider = new MockDataProvider(seedProducts, seedOrders, store);
+
+    await provider.transact(async (p) => {
+      store.publish({
+        version: 1,
+        products: seedProducts.map((s) => (s.id === "prod_001" ? { ...s, inventoryCount: 99 } : s)),
+        orders: seedOrders,
+      });
+      await p.getProductBySku("TCH-AB-001");
+    });
+
+    assert.equal(
+      (await provider.getProductBySku("TCH-AB-001"))!.inventoryCount,
+      99,
+      "the deferral must end with the transaction, not disable freshness"
+    );
+  });
+
+  it("keeps serving its own copy when the store cannot report a change token", async () => {
+    // A deliberately token-less store: `changeToken` is optional on the
+    // contract, and a backend that cannot detect another writer must keep the
+    // behaviour this project always had rather than re-reading on every call.
+    let state: PersistedState | undefined;
+    const tokenless: StateStore = {
+      description: "tokenless test store",
+      load: () => (state === undefined ? undefined : structuredClone(state)),
+      save: (next) => {
+        state = structuredClone(next);
+      },
+    };
+    assert.equal(tokenless.changeToken, undefined, "this store must not report a token");
+
+    const provider = new MockDataProvider(seedProducts, seedOrders, tokenless);
+    tokenless.save({
+      version: 1,
+      products: seedProducts.map((p) => ({ ...p, inventoryCount: 1 })),
+      orders: seedOrders,
+    });
+
+    assert.equal(
+      (await provider.getProductBySku("TCH-AB-001"))!.inventoryCount,
+      42,
+      "without a token the provider must not reload, and so keeps serving its own copy"
+    );
   });
 });

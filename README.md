@@ -104,7 +104,7 @@ npm run test:coverage # the suite under coverage, with minimum thresholds
 npm run verify        # typecheck + lint + coverage + build, in one shot
 ```
 
-255 tests, no test framework to install — Node's built-in test runner drives
+263 tests, no test framework to install — Node's built-in test runner drives
 `tsx`. The
 suites are typechecked before they run (`pretest` → `npm run typecheck`), which
 covers them as well as the source; previously only the source was checked, so a
@@ -217,6 +217,16 @@ The suite drives two real server processes against one directory to pin this —
 both orders survive, stock reflects both, and ten racing attempts at 5 units
 against a stock of 42 fill exactly eight orders rather than driving inventory
 negative. The lock is released on commit, rollback, or process death.
+
+**Reading.** A server keeps its catalog in memory, and an MCP client keeps a
+server alive for a whole conversation — so a second window could write while this
+one reads. Before each read the server compares a cheap change token
+(`PRAGMA data_version`, which moves for other connections' commits and not for
+its own) and reloads only when another process has actually committed. Staying
+current therefore costs one query per read rather than a full reload, and a
+server that never wrote anything still sees what everyone else did. A read never
+happens mid-transaction, so a reload can never discard a write that has not
+committed yet.
 
 `PROJECT_TANGO_STORE=json` keeps the previous whole-snapshot backend available,
 and its guarantee is deliberately narrower: it publishes one process's complete

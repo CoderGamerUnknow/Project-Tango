@@ -47,6 +47,22 @@ function requireUpdate(store: StateStore): NonNullable<StateStore["update"]> {
   return store.update;
 }
 
+/**
+ * The store's change token, or a loud failure.
+ *
+ * Freshness is a guarantee rather than an optimisation here: without a token the
+ * provider silently keeps serving its own copy, which is exactly the behaviour
+ * these tests exist to prevent, so it is asserted rather than assumed.
+ */
+function requireChangeToken(store: StateStore): string {
+  assert.equal(
+    typeof store.changeToken,
+    "function",
+    "the SQLite store must report when another process committed"
+  );
+  return store.changeToken!();
+}
+
 function makeState(overrides: Partial<PersistedState> = {}): PersistedState {
   return {
     version: STATE_VERSION,
@@ -93,6 +109,48 @@ describe("createSqliteStore", () => {
       assert.ok(store, "store should be available");
       assert.equal(store.load(), undefined, "an untouched database must report no state");
       store.close?.();
+    });
+  });
+
+  it("reports another process's commit through changeToken, and not its own", async () => {
+    // The contract the provider's read-freshness check depends on. `PRAGMA
+    // data_version` moves for every *other* connection's commit and not for this
+    // one — verified here rather than assumed, because both halves matter: a
+    // token that also moved on our own writes would make every provider re-read
+    // the whole catalog after each order it placed, and one that stayed still
+    // for other writers would leave a server serving a replaced catalog for the
+    // rest of the conversation.
+    await withTempDir((dir) => {
+      const mine = createSqliteStore(dir);
+      const theirs = createSqliteStore(dir);
+      assert.ok(mine && theirs, "both stores should open");
+      try {
+        const own = requireChangeToken(mine);
+        const before = requireChangeToken(theirs);
+
+        mine.save(makeState());
+        assert.equal(
+          requireChangeToken(mine),
+          own,
+          "our own commit is already in this process's memory, so it must not ask for a reload"
+        );
+        assert.notEqual(
+          requireChangeToken(theirs),
+          before,
+          "a second server watching the same database must see the commit"
+        );
+
+        const afterMine = requireChangeToken(mine);
+        theirs.save(makeState({ products: [] }));
+        assert.notEqual(
+          requireChangeToken(mine),
+          afterMine,
+          "another process's commit must be visible, or reads go stale for the life of the server"
+        );
+      } finally {
+        mine.close?.();
+        theirs.close?.();
+      }
     });
   });
 

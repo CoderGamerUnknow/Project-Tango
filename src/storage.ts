@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -59,6 +59,25 @@ export interface StateStore {
   readonly update?: <T>(
     fn: (current: PersistedState | undefined) => Promise<{ commit?: PersistedState; result: T }>
   ) => Promise<T>;
+
+  /**
+   * A cheap token that changes when *another process* committed, if the backend
+   * can tell.
+   *
+   * This is what lets a running server notice that its in-memory catalog is no
+   * longer the truth without re-reading the whole store on every call. The
+   * provider compares the token before each read and reloads only when it moved,
+   * so the cost of staying fresh is one query rather than a full snapshot.
+   *
+   * SQLite's answer is `PRAGMA data_version`, which is defined to change for
+   * every other connection's commit and *not* for the connection's own — exactly
+   * the property needed, since the provider's own writes are already reflected
+   * in its memory and must not trigger a pointless reload.
+   *
+   * Optional: a backend that cannot detect another writer simply omits it, and
+   * the provider keeps the previous behaviour of trusting its own copy.
+   */
+  readonly changeToken?: () => string;
 
   /** Release any handle the backend holds. A server exits with it. */
   close?(): void;
@@ -187,6 +206,10 @@ export function validRecords<T>(
  */
 export function createMemoryStore(): StateStore {
   let current: PersistedState | undefined;
+  // No other process can write here, so the token only has to be stable across
+  // reads and move when this store is written. It exists so callers can treat
+  // every store the same way instead of special-casing the in-memory one.
+  let writes = 0;
 
   return {
     description: "in-memory (state is discarded when the server stops)",
@@ -197,7 +220,9 @@ export function createMemoryStore(): StateStore {
     load: () => (current === undefined ? undefined : structuredClone(current)),
     save: (state) => {
       current = structuredClone(state);
+      writes += 1;
     },
+    changeToken: () => `memory:${writes}`,
   };
 }
 
@@ -292,6 +317,20 @@ export function createFileStore(directory: string, log: Logger = noopLogger): St
         // A read-only home directory must not take the tools down; the order is
         // still applied in memory and reported to the caller as a success.
         log(`Project Tango: could not persist state to ${file}: ${(error as Error).message}`);
+      }
+    },
+
+    changeToken: () => {
+      try {
+        // Nanoseconds, not the millisecond `mtimeMs`: two writes can land inside
+        // one millisecond, and a token that misses one of them means a server
+        // keeps serving a catalog another process has already replaced.
+        const stat = statSync(file, { bigint: true });
+        return `${stat.size}:${stat.mtimeNs.toString()}`;
+      } catch {
+        // No file yet, or it just went away. Either way nothing of ours is
+        // stale, and the next successful write produces a different token.
+        return "absent";
       }
     },
   };

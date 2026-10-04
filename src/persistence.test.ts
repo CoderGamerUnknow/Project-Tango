@@ -288,6 +288,76 @@ describe("persistence", () => {
     );
   });
 
+  it("keeps the whole catalog when the first write re-reads a partial imported state", async () => {
+    // Regression, found by chasing a cross-process read bug. A legacy state file
+    // holding one product is imported into `state.db` as one row, and the startup
+    // reconcile puts the other twelve seed products back in memory — but a
+    // transaction re-reads the store under its lock and adopted that row set
+    // verbatim. The server therefore listed thirteen products and then refused an
+    // order for one of them with `no product found with id "prod_001"`, and the
+    // commit that followed persisted the loss for good.
+    await withSession(
+      async (boot) => {
+        const c = await boot();
+        const listed = parse(await c.callTool({ name: "list_all_products", arguments: {} }));
+        assert.equal(listed.count, 13);
+
+        // Order a product that only ever existed in the seed catalog.
+        const seeded = (await readProduct(c, "prod_001")).inventoryCount;
+        const placed = await c.callTool({
+          name: "simulate_order_placement",
+          arguments: { customer_name: "Seed Only", items: [{ product_id: "prod_001", quantity: 1 }] },
+        });
+        assert.equal(
+          placed.isError,
+          undefined,
+          `ordering a listed product failed: ${JSON.stringify(placed.content)}`
+        );
+        assert.equal((await readProduct(c, "prod_001")).inventoryCount, seeded - 1);
+
+        // And the repair is durable: the commit writes the reconciled catalog, so
+        // the stored state is healed rather than eroded. A restart reads the
+        // database directly, so it is the only thing that can prove that.
+        const restarted = await boot();
+        const after = parse(await restarted.callTool({ name: "list_all_products", arguments: {} }));
+        assert.equal(after.count, 13, "the stored catalog must not have kept the erosion");
+        assert.equal(
+          after.products.find((p: { id: string }) => p.id === "prod_001").inventoryCount,
+          seeded - 1
+        );
+      },
+      JSON.stringify({ version: 1, products: [RESTORED_SSD], orders: [] })
+    );
+  });
+
+  it("shows one running server another's order without a restart", async () => {
+    // MCP clients keep a server process alive for a whole conversation, and a
+    // second window (or a second tool) can be writing at the same time. Reads
+    // used to be served from the process's own copy, which only caught up when
+    // this process wrote something itself.
+    await withSession(async (boot) => {
+      const [reader, writer] = await Promise.all([boot(), boot()]);
+      const seeded = (await readProduct(reader, "prod_001")).inventoryCount;
+
+      const placed = await writer.callTool({
+        name: "simulate_order_placement",
+        arguments: { customer_name: "Other Process", items: [{ product_id: "prod_001", quantity: 3 }] },
+      });
+      assert.equal(placed.isError, undefined);
+
+      assert.equal(
+        (await readProduct(reader, "prod_001")).inventoryCount,
+        seeded - 3,
+        "the idle server must serve the committed stock, not its own stale copy"
+      );
+
+      const found = parse(
+        await reader.callTool({ name: "find_orders", arguments: { customer_name: "Other Process" } })
+      );
+      assert.equal(found.count, 1, "the other process's order must be visible here too");
+    });
+  });
+
   it("starts from the seed dataset when the state file is corrupt, without crashing", async () => {
     await withSession(async (boot) => {
       const c = await boot();

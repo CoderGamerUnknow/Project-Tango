@@ -70,6 +70,41 @@ transaction lock — and a freshly started process is always current. Two server
 driven from one client are the case this shows up in; the lifecycle suite reads
 the final state through a new process for exactly that reason.
 
+> **Resolved after this tag.** See [Unreleased](#unreleased) below: reads now
+> refresh against `PRAGMA data_version`.
+
+## Unreleased
+
+Work on `main` after the `v3.1.0` tag. Two fixes, both found while trying to
+make a server notice that another process had written.
+
+### Fixed
+
+- **A server listed thirteen products and then refused to sell one of them.**
+  Saved state can legitimately hold fewer products than the seed catalog — a
+  `state.json` written before a product was added, or one whose rows were pruned
+  — and the startup reconcile put the missing ones back in memory. A transaction
+  then re-read the store under its write lock and adopted that smaller row set
+  *verbatim*, so the catalog collapsed to whatever the file happened to contain,
+  and `simulate_order_placement` answered `no product found with id "prod_001"`
+  for a product `list_all_products` had just returned. The commit that followed
+  persisted the loss, so the erosion survived every restart. Reconciliation now
+  happens wherever stored state is adopted, and because a commit writes what is
+  in memory, the stored catalog is repaired rather than eroded.
+- **A running server kept serving a catalog another process had replaced.**
+  Reads came from the process's own copy, which only caught up when that process
+  wrote something itself — so an agent could place an order in one window and be
+  told stale inventory in the next. Reads now compare a cheap change token first
+  (`PRAGMA data_version`, `stat` on the JSON backend) and reload only when
+  another process committed. The check is skipped during a transaction, where a
+  reload would discard state that has not committed yet.
+
+### Added
+
+- **`StateStore.changeToken?()`** — an optional cheap token that moves when
+  another process committed. Optional on purpose: a backend that cannot detect
+  another writer keeps the previous behaviour instead of re-reading blindly.
+
 ## Why the `v2.0.0` trie was ported as ranking
 
 `v2.0.0` replaced substring search with prefix-only matching and called it an

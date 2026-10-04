@@ -100,7 +100,7 @@ npm run test:coverage # the suite under coverage, with minimum thresholds
 npm run verify        # typecheck + lint + coverage + build, in one shot
 ```
 
-204 tests, no test framework to install — Node's built-in test runner drives
+210 tests, no test framework to install — Node's built-in test runner drives
 `tsx`. The
 suites are typechecked before they run (`pretest` → `npm run typecheck`), which
 covers them as well as the source; previously only the source was checked, so a
@@ -157,8 +157,11 @@ duplicate order lines driving inventory negative, colliding order ids, a
 `Math.max(NaN, …)` seed that silently broke lookback anchoring, concurrent
 orders overselling stock from -7, saved state silently deleting seed products,
 unchecked restored records crashing the catalog, reads handing out live
-references whose mutation bypassed the persistence counter, and a throwing
-transaction committing the half-applied state it was supposed to discard.
+references whose mutation bypassed the persistence counter, a throwing
+transaction committing the half-applied state it was supposed to discard, a
+sales lookback window that measured 31 days of demand and divided by 30, and
+non-finite numbers in a restored state file failing every analytics tool's output
+validation.
 
 ---
 

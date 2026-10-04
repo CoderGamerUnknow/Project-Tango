@@ -42,6 +42,14 @@ export interface LookbackWindow {
  * Anchored to the most recent order rather than wall-clock today, so a static
  * seed dataset never ages out of its own analysis window. Against a live
  * provider the two are equivalent, since real orders track real time.
+ *
+ * The window spans exactly `lookbackDays` **calendar days including the anchor
+ * day**, so `startMs` is `lookbackDays - 1` days before `endMs`. Because
+ * `ordersWithinWindow` includes both bounds, subtracting the full
+ * `lookbackDays * MS_PER_DAY` produced a window covering `lookbackDays + 1`
+ * days while `dailyVelocity` still divided by `lookbackDays` — inflating every
+ * velocity by one day's worth of sales (a 30-day lookback measured 31 days of
+ * demand and called it 30), understating days of cover and over-ordering.
  */
 export function resolveLookbackWindow(
   orders: Order[],
@@ -57,7 +65,9 @@ export function resolveLookbackWindow(
   }, Number.NEGATIVE_INFINITY);
 
   const endMs = latestOrderMs === Number.NEGATIVE_INFINITY ? nowMs : latestOrderMs;
-  return { startMs: endMs - lookbackDays * MS_PER_DAY, endMs };
+  // `Math.max(0, …)` so a zero-day lookback yields the anchor day alone rather
+  // than a start after the end, which would silently match nothing.
+  return { startMs: endMs - Math.max(0, lookbackDays - 1) * MS_PER_DAY, endMs };
 }
 
 /** Narrow a list of orders to those falling inside `window`, inclusive of both bounds. */

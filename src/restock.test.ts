@@ -179,7 +179,39 @@ describe("computeRestockPlan", () => {
     });
 
     assert.equal(plan.window.end, "2026-09-20");
-    assert.equal(plan.window.start, "2026-08-21");
+    // 30 calendar days inclusive of the anchor day: 2026-08-22 .. 2026-09-20.
+    // Was 2026-08-21, a 31-day span divided by a 30-day denominator.
+    assert.equal(plan.window.start, "2026-08-22");
+  });
+
+  it("divides by the days the window actually covers", () => {
+    // Regression, end to end: one unit a day for 30 days, plus one large order
+    // a week older than the window. The inflated 31-day window counted that
+    // order, reported 131 units and a velocity of 4.4/day against a stock of 2,
+    // over-ordering by a whole day of demand.
+    const products = [makeProduct({ id: "p1", inventoryCount: 2 })];
+    const orders: Array<ReturnType<typeof makeOrder>> = [];
+    for (let daysBack = 29; daysBack >= 0; daysBack--) {
+      orders.push(
+        makeOrder(`d${daysBack}`, [{ productId: "p1", quantity: 1 }], {
+          date: new Date(NOW - daysBack * 86_400_000).toISOString().slice(0, 10),
+        })
+      );
+    }
+    orders.push(
+      makeOrder("stale", [{ productId: "p1", quantity: 100 }], {
+        date: new Date(NOW - 36 * 86_400_000).toISOString().slice(0, 10),
+      })
+    );
+
+    const plan = computeRestockPlan(products, orders, { ...RESTOCK_PARAMS, threshold: 5, nowMs: NOW });
+    const rec = plan.recommendations[0];
+
+    assert.equal(plan.window.ordersInWindow, 30, "the stale order must fall outside a 30-day window");
+    assert.equal(rec?.unitsSoldInWindow, 30);
+    assert.equal(rec?.dailyVelocity, 1, "30 units over the 30 days the window reports");
+    assert.equal(rec?.daysOfCover, 2, "2 units in stock at 1/day");
+    assert.equal(rec?.recommendedReorderQuantity, 19, "1/day x 21 days, less the 2 in stock");
   });
 
   it("restricts the plan to one category and echoes what it applied", () => {

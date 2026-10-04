@@ -30,7 +30,9 @@ describe("resolveLookbackWindow", () => {
     const window = resolveLookbackWindow(orders, 30, NOW);
 
     assert.equal(window.endMs, Date.parse("2026-09-20T00:00:00.000Z"));
-    assert.equal(window.startMs, Date.parse("2026-08-21T00:00:00.000Z"));
+    // 30 calendar days inclusive of the anchor day. This asserted 2026-08-21,
+    // a 31-day span — the off-by-one that inflated every velocity.
+    assert.equal(window.startMs, Date.parse("2026-08-22T00:00:00.000Z"));
   });
 
   it("ignores orders with unparseable dates when choosing the anchor", () => {
@@ -46,6 +48,42 @@ describe("resolveLookbackWindow", () => {
 
   it("falls back to nowMs when there are no orders at all", () => {
     assert.equal(resolveLookbackWindow([], 30, NOW).endMs, NOW);
+  });
+
+  it("covers exactly lookbackDays calendar days, counting the anchor day", () => {
+    // Regression: the window is inclusive of both bounds, so subtracting the
+    // full lookback from the anchor made it span lookbackDays + 1 days while
+    // velocity still divided by lookbackDays — inflating every velocity by one
+    // day of sales and over-ordering. 30 days back from 2026-10-01 inclusive is
+    // 2026-09-02, not 2026-09-01.
+    const window = resolveLookbackWindow([], 30, NOW);
+    const days = Math.round((window.endMs - window.startMs) / 86_400_000) + 1;
+
+    assert.equal(days, 30);
+    assert.equal(new Date(window.startMs).toISOString().slice(0, 10), "2026-09-02");
+  });
+
+  it("keeps a zero-day lookback anchored on the anchor day instead of inverting", () => {
+    const window = resolveLookbackWindow([], 0, NOW);
+
+    assert.equal(window.startMs, window.endMs);
+    assert.equal(window.startMs, NOW);
+  });
+
+  it("measures velocity over the same days the window reports", () => {
+    // The end-to-end shape of the off-by-one: 1 unit/day for 30 days, plus one
+    // order just outside the window, must read as exactly 30 units and 1.0/day.
+    const window = resolveLookbackWindow([], 30, NOW);
+    const inside = ordersWithinWindow(
+      [
+        makeOrder("edge", [], { date: new Date(window.startMs).toISOString().slice(0, 10) }),
+        makeOrder("anchor", [], { date: new Date(window.endMs).toISOString().slice(0, 10) }),
+        makeOrder("before", [], { date: "2026-09-01" }),
+      ],
+      window
+    );
+
+    assert.equal(inside.length, 2, "the day before the window must not be counted");
   });
 });
 

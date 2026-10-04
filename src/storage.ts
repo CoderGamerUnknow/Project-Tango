@@ -56,6 +56,32 @@ function isPersistedState(value: unknown): value is PersistedState {
 }
 
 /**
+ * A finite number — the check every numeric field below needs.
+ *
+ * `typeof x === "number"` is not enough. `JSON.parse("1e999")` is `Infinity`,
+ * and `Infinity` passes `typeof`, so a hand-edited or foreign-written state file
+ * carried a non-finite price straight into the catalog. `JSON.stringify` then
+ * serialises it as `null`, so the tool's own text copy and its
+ * `structuredContent` copy of the same answer disagreed, and the SDK rejected
+ * the response outright: every analytics call failed with
+ * `Output validation error: expected number, received Infinity`. One bad field
+ * in one record took down all four read tools.
+ */
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+/**
+ * A finite integer.
+ *
+ * Quantities and unit counts are declared `z.number().int()` in `schemas.ts`,
+ * so a fractional quantity that reached the catalog failed output validation the
+ * same way an `Infinity` did. Validating against the schemas' own contract here
+ * is what keeps a restored record inside the shape the tools promise.
+ */
+const isInteger = (value: unknown): value is number =>
+  isFiniteNumber(value) && Number.isInteger(value);
+
+/**
  * Per-record shape checks.
  *
  * The envelope check alone is not enough: restored records are injected straight
@@ -65,6 +91,10 @@ function isPersistedState(value: unknown): value is PersistedState {
  * individually and bad ones dropped, rather than rejecting the whole file —
  * one bad record must not discard the rest of a real catalog. A dropped product
  * then falls back to its seed row via the provider's reconcile step.
+ *
+ * Numbers are checked for finiteness, not just type, for the reason
+ * `isFiniteNumber` documents: a record that parses is not necessarily a record
+ * the response schemas will accept.
  */
 function isProduct(value: unknown): value is Product {
   if (typeof value !== "object" || value === null) return false;
@@ -73,8 +103,8 @@ function isProduct(value: unknown): value is Product {
     typeof p.id === "string" &&
     typeof p.name === "string" &&
     typeof p.sku === "string" &&
-    typeof p.price === "number" &&
-    typeof p.inventoryCount === "number" &&
+    isFiniteNumber(p.price) &&
+    isInteger(p.inventoryCount) &&
     typeof p.category === "string" &&
     Array.isArray(p.tags) &&
     p.tags.every((t) => typeof t === "string") &&
@@ -88,17 +118,15 @@ function isOrder(value: unknown): value is Order {
   return (
     typeof o.id === "string" &&
     typeof o.customerName === "string" &&
-    typeof o.totalAmount === "number" &&
+    isFiniteNumber(o.totalAmount) &&
     typeof o.date === "string" &&
     (o.status === "pending" || o.status === "shipped" || o.status === "delivered") &&
     Array.isArray(o.items) &&
-    o.items.every(
-      (i) =>
-        typeof i === "object" &&
-        i !== null &&
-        typeof (i as Record<string, unknown>).productId === "string" &&
-        typeof (i as Record<string, unknown>).quantity === "number"
-    )
+    o.items.every((i) => {
+      if (typeof i !== "object" || i === null) return false;
+      const item = i as Record<string, unknown>;
+      return typeof item.productId === "string" && isInteger(item.quantity);
+    })
   );
 }
 

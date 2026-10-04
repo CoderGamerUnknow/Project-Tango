@@ -1,6 +1,6 @@
 {
   "name": "project-tango",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Local-first MCP server that lets LLM agents inspect, analyze, and manage e-commerce data (products, inventory, orders) over stdio. Zero-config mock data engine included, with a clean interface to swap in live Shopify/Stripe APIs.",
   "type": "module",
   "main": "dist/index.js",

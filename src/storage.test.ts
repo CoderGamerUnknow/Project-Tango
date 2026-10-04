@@ -223,6 +223,77 @@ describe("createFileStore", () => {
     });
   });
 
+  it("drops non-finite and fractional numbers rather than letting them break every tool", async () => {
+    // Regression: `typeof x === "number"` accepts `Infinity` (which is what
+    // `JSON.parse("1e999")` yields) and fractional quantities. Both reached the
+    // catalog and then failed the tools' own output schemas, so one bad field in
+    // one record turned `analyze_sales_metrics`, `smart_restock_predictor` and
+    // `find_orders` into `Output validation error: expected number/int`. The
+    // raw JSON is written by hand here because `JSON.stringify` cannot express
+    // either value — which is exactly why only a foreign state file produces it.
+    await withTempDir((dir) => {
+      writeFileSync(
+        join(dir, "state.json"),
+        JSON.stringify({
+          version: STATE_VERSION,
+          products: [],
+          orders: [
+            makeState().orders[0], // complete
+            {
+              id: "ord_inf",
+              customerName: "Inf",
+              items: [{ productId: "prod_001", quantity: 1e999 }],
+              totalAmount: 10,
+              status: "pending",
+              date: "2026-10-01",
+            },
+            {
+              id: "ord_frac",
+              customerName: "Frac",
+              items: [{ productId: "prod_001", quantity: 1.5 }],
+              totalAmount: 15,
+              status: "pending",
+              date: "2026-10-01",
+            },
+          ],
+        })
+      );
+
+      const loaded = createFileStore(dir, () => {}).load();
+
+      assert.deepEqual(
+        loaded?.orders.map((o) => o.id),
+        ["ord_1"]
+      );
+      // And the numbers that survive are genuinely finite and integral.
+      for (const product of loaded?.products ?? []) {
+        assert.ok(Number.isFinite(product.price), `${product.id} price is not finite`);
+        assert.ok(Number.isInteger(product.inventoryCount), `${product.id} stock is not an integer`);
+      }
+    });
+  });
+
+  it("drops products whose numeric fields are not finite", async () => {
+    await withTempDir((dir) => {
+      writeFileSync(
+        join(dir, "state.json"),
+        JSON.stringify({
+          version: STATE_VERSION,
+          products: [makeState().products[0], { ...makeState().products[0], id: "prod_inf" }],
+          orders: [],
+        }).replace('"price":10,"inventoryCount":5,"category":"tech","tags":["a"],"description":"A widget."}]', '"price":1e999,"inventoryCount":5,"category":"tech","tags":["a"],"description":"A widget."}]')
+      );
+
+      const loaded = createFileStore(dir, () => {}).load();
+
+      assert.deepEqual(
+        loaded?.products.map((p) => p.id),
+        ["prod_001"]
+      );
+      assert.ok(Number.isFinite(loaded?.products[0]?.price));
+    });
+  });
+
   it("keeps a complete state file loaded with no warnings", async () => {
     await withTempDir((dir) => {
       createFileStore(dir).save(makeState());
